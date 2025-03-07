@@ -1,0 +1,54 @@
+python train.py --model=HGRC --dataset=IMDB --device=cuda:0 --model_type=classifier >> HGRC_IMDB_sentence_2G.txt
+
+python train.py --model=HGRC --dataset=IMDB_lra --device=cuda:0 --model_type=classifier >> HGRC_IMDB_lra_classifier_2G.txt
+
+python train.py --model=HGRC --dataset=listops_lra --device=cuda:0 --model_type=classifier >> HGRC_listops_lra_sentence_2G.txt
+
+python train.py --model=HGRC --dataset=listops_lra_speed --device=cuda:0 --model_type=classifier >> HGRC_listops_lra_speed_sentence_2G.txt
+
+python train.py --model=HGRC --dataset=QQP --device=cuda:0 --model_type=sentence_pair >> HGRC_QQP_sentence_2G.txt
+
+python train.py --model=HGRC --dataset=SNLI --device=cuda:0 --model_type=sentence_pair >> HGRC_SNLI_sentence_2G.txt
+
+python train.py --model=HGRC --dataset=proplogic --device=cuda:0 --model_type=sentence_pair >> HGRC_proplogic_sentence_2G.txt
+
+python train.py --model=HGRC --dataset=MNLIdev --device=cuda:0 --model_type=sentence_pair >> HGRC_MNLIdev_sentence_XG.txt
+
+
+
+python train.py --model=HEBT_GRC --dataset=IMDB --device=cuda:0 --model_type=classifier >> HEBT_GRC_IMDB_sentence_2G.txt
+
+python train.py --model=HEBT_GRC --dataset=IMDB_lra --device=cuda:0 --model_type=classifier >> HEBT_GRC_IMDB_lra_sentence_2G.txt
+
+python train.py --model=HEBT_GRC --dataset=listops_lra --device=cuda:0 --model_type=classifier >> HEBT_GRC_listops_lra_sentence_2G.txt
+
+python train.py --model=HEBT_GRC --dataset=listops_lra_speed --device=cuda:0 --model_type=classifier >> HEBT_listops_lra_speed_sentence_2G.txt
+
+python train.py --model=HEBT_GRC --dataset=QQP --device=cuda:0 --model_type=sentence_pair >> HEBT_GRC_QQP_sentence_2G.txt
+
+python train.py --model=HEBT_GRC --dataset=SNLI --device=cuda:0 --model_type=sentence_pair >> HEBT_GRC_SNLI_sentence_2G.txt
+
+python train.py --model=HEBT_GRC --dataset=proplogic --device=cuda:0 --model_type=sentence_pair >> HEBT_GRC_proplogic_sentence_2G.txt
+
+python train.py --model=HEBT_GRC --dataset=MNLIdev --device=cuda:0 --model_type=sentence_pair >> HEBT_GRC_MNLIdev_sentence_XG.txt
+
+
+
+python train.py --model=SadsNetWork --dataset=IMDB_lra --device=cuda:0 --model_type=classifier >> SADS_IMDB_lra_sentence_2G.txt
+
+python train.py --model=SadsNetWork --dataset=listops_lra --device=cuda:0 --model_type=classifier >> SADS_listops_lra_sentence_5G.txt
+
+python train.py --model=SadsNetWork --dataset=listops_lra_speed --device=cuda:0 --model_type=classifier >> SADS_listops_lra_speed_sentence_5G.txt
+
+python train.py --model=SadsNetWork --dataset=IMDB --device=cuda:0 --model_type=classifier >> SADS_IMDB_classifier_3G.txt
+
+python train.py --model=SadsNetWork --dataset=QQP --device=cuda:0 --model_type=sentence_pair >> SADS_QQP_sentence_2G.txt
+
+python train.py --model=SadsNetWork --dataset=SNLI --device=cuda:0 --model_type=sentence_pair >> SADS_SNLI_sentence_2G.txt
+
+python train.py --model=SadsNetWork --dataset=MNLIdev --device=cuda:0 --model_type=sentence_pair >> SADS_MNLIdev_sentence_XG.txt
+
+python train.py --model=SadsNetWork --dataset=proplogic --device=cuda:0 --model_type=sentence_pair >> SADS_proplogic_sentence_2G.txt
+
+
+
