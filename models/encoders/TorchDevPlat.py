@@ -2016,29 +2016,29 @@ class RecurrentRnnNetWork(nn.Module):
             self.mergeModuleDict[str(i)] = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         '''
 
-        #'''
+        '''
         if (isNeedMaskMem):
             #self.handleModule = MemRnnNetWork(self.taskName, self.isBatchFirst, self.isNeedMaskMem, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
             self.handleModule = MemLstmNetWork(self.taskName, self.isBatchFirst, self.isNeedMaskMem, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         else:
             self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, self.isBidirectional, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+        '''
+
+        '''
+        if (isNeedMaskMem):
+            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, True, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+        else:
+            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, True, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+        '''
+
         #'''
-
-        '''
-        if (isNeedMaskMem):
-            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, True, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-        else:
-            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, True, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-        '''
-
-        '''
         if (isNeedMaskMem):
             #self.handleModule = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
             self.handleModule = MaskLstmNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         else:
             #self.handleModule = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
             self.handleModule = MaskLstmNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-        '''
+        #'''
 
         self.outputModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, self.isBidirectional, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
 
@@ -2482,7 +2482,7 @@ class SadsNetWork(nn.Module):
             self.multiheadAttention = MultiHeadAttention(self.hiddenDim, self.headNum, self.resDropRate)
         '''
 
-        '''
+        #'''
         #HGRC mask func
         self.RNN = S4DWrapper(config)
         self.initial_transform = nn.Linear(self.hiddenDim, self.hiddenDim)
@@ -2496,7 +2496,7 @@ class SadsNetWork(nn.Module):
             pass
         else:
             self.NT = nn.LayerNorm(self.hiddenDim)
-        '''
+        #'''
 
         #额叶
         self.frontalLobe = RecurrentRnnNetWork(self.taskName, self.isBatchFirst, self.isNeedHidden, False, True, self.lobeLabelDim, self.trainDataNum, self.lobeLabelDim, self.hiddenDim, self.layerNum, self.maxSeqLen, self.splitPartNum, self.crossLenRate, self.maxLevelNum, self.manualSeed, self.batchSize, self.resDropRate, self.learnRate, self.weightDecay).to(self.device)
@@ -2514,7 +2514,7 @@ class SadsNetWork(nn.Module):
     def SetModel(self, model):
         self.model = model
 
-    '''
+    #'''
     def normalize(self, state):
         if self.norm == "batch":
             return self.NT(state.permute(0, 2, 1).contiguous()).permute(0, 2, 1).contiguous()
@@ -2522,7 +2522,7 @@ class SadsNetWork(nn.Module):
             return state
         else:
             return self.NT(state)
-    '''
+    #'''
 
     def SetCriterion(self, func):
         self.criterion = func
@@ -2567,19 +2567,18 @@ class SadsNetWork(nn.Module):
         #if (inputData.shape[0] > self.batchSize):
         #    print(f"SadsNetWork self.batchSize = {self.batchSize}, inputData = {inputData.shape}, inputMask = {inputMask.shape}")
 
-        #'''
+        '''
         #no mask
         inputData = GenerateNormalizeRst(inputData)
         self.SetTrainDataInfo(inputData, inputMask)
-        #'''
-
         '''
+
+        #'''
         #HGRC mask method
         inputData = self.RNN(inputData, inputMask)["sequence"]
         inputData = self.normalize(self.initial_transform(inputData))
-        input = inputData
         self.SetTrainDataInfo(inputData, inputMask)
-        '''
+        #'''
 
         #print(f"inputData = {inputData.shape}, inputMask = {inputMask.shape}")
 
