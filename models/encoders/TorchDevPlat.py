@@ -2580,8 +2580,6 @@ class SadsNetWork(nn.Module):
         self.SetTrainDataInfo(inputData, inputMask)
         #'''
 
-        #print(f"inputData = {inputData.shape}, inputMask = {inputMask.shape}")
-
         '''
         if (self.headNum != 0):
             attentionOut = self.multiheadAttention(inputData, inputData, inputData)

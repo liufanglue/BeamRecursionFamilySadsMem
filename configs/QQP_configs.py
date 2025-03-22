@@ -176,7 +176,7 @@ class SadsNetWork_config(HEBT_GRC_config):
         self.hiddenDim = 300
         self.layerNum = 1
         self.maxSeqLen = 20
-        self.splitPartNum = 5
+        self.splitPartNum = 25
         self.crossLenRate = 0.01
         self.maxLevelNum = 6
         self.cacheSize = 4
