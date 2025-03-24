@@ -445,6 +445,7 @@ The nomenclature in the codebase and in the paper are a bit different. We provid
 * HEBT_GRC_chunk20 == RIR-EBT-GRC (chunk 20)
 * HEBT_GRC_chunk10 == RIR-EBT-GRC (chunk 10)
 * MEGA == MEGA
+* SadsNetWork == Sads-Mem
 
 ### Citations:
 
