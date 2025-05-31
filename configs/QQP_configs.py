@@ -2,16 +2,16 @@ class optimizer_config:
     def __init__(self):
         # optimizer config
         self.max_grad_norm = 5
-        self.batch_size = 128
-        self.train_batch_size = 128
-        self.dev_batch_size = 128
+        self.batch_size = 64
+        self.train_batch_size = 64
+        self.dev_batch_size = 64
         self.bucket_size_factor = 10
         self.DataParallel = False
         self.num_workers = 6
         self.weight_decay = 1e-2
         self.lr = 1e-3
         self.epochs = 50
-        self.early_stop_patience = 10
+        self.early_stop_patience = 5
         self.scheduler = "ReduceLROnPlateau"
         self.scheduler_patience = 2
         self.scheduler_reduce_factor = 0.5
@@ -175,8 +175,8 @@ class SadsNetWork_config(HEBT_GRC_config):
         self.labelDataDim = self.input_size
         self.hiddenDim = 300
         self.layerNum = 1
-        self.maxSeqLen = 20
-        self.splitPartNum = 25
+        self.maxSeqLen = 25
+        self.splitPartNum = 20
         self.crossLenRate = 0.01
         self.maxLevelNum = 6
         self.cacheSize = 4

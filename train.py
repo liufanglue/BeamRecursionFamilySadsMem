@@ -357,6 +357,3 @@ if __name__ == '__main__':
     endTime = datetime.now()
     print(f"time = {endTime - startTime}")
 
-
-
-

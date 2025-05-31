@@ -11,7 +11,7 @@ class optimizer_config:
         self.weight_decay = 1e-2
         self.lr = 1e-3
         self.epochs = 100
-        self.early_stop_patience = 10
+        self.early_stop_patience = 5
         self.scheduler = "ReduceLROnPlateau"
         self.scheduler_patience = 2
         self.scheduler_reduce_factor = 0.5

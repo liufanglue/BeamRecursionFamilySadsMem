@@ -224,7 +224,7 @@ class SadsNetWork_config(HEBT_GRC_config):
         self.lobeLabelDim = self.input_size
         self.labelDataDim = self.input_size
         self.hiddenDim = 300
-        self.layerNum = 2
+        self.layerNum = 1
         self.maxSeqLen = 30
         self.splitPartNum = 25
         self.crossLenRate = 0.01

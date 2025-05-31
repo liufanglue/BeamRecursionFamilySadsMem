@@ -66,6 +66,7 @@ class sentence_pair_agent:
     # %%
     def loss_fn(self, logits, labels, train=False, aux_loss=None):
         if self.config["classes_num"] == 2:
+            #labels invalid
             labels = F.one_hot(labels, num_classes=2).float()
             labels = labels[..., 1].unsqueeze(-1)
         loss = self.criterion(logits, labels)
@@ -97,7 +98,7 @@ class sentence_pair_agent:
         logits = output_dict["logits"]
         labels = batch["labels"].to(logits.device)
         aux_loss = output_dict["aux_loss"]
-
+        #print(f"run logits = {logits.shape}, labels = {labels.shape}")
         loss = self.loss_fn(logits=logits, labels=labels,
                             train=train, aux_loss=aux_loss)
 
@@ -109,6 +110,7 @@ class sentence_pair_agent:
         else:
             predictions = T.argmax(logits, dim=-1)
             #print(f"logits = {logits}")
+        #print(f"predictions = {predictions.detach().cpu()}")
         predictions = predictions.detach().cpu().numpy().tolist()
 
         labels = batch["labels"].cpu().numpy().tolist()

@@ -33,8 +33,8 @@ INVALID_NUM = 0xFFFFFFFF
 # CSV转Torch 数据类 begin
 
 class TransCsvToTorch:
-    def __init__(self, filePath, codeFormat, dateCol, dataStartRank, dataStartCol, isNeedRevert):
-        #print(f"TransCsvToTorch enter filePath = {filePath}")
+    def __init__(self, filePath, codeFormat, dateCol, dataStartRank, dataStartCol, isNeedRevert, isSizeDown):
+        print(f"TransCsvToTorch enter filePath = {filePath}")
         if not os.path.exists(filePath):
             print(r'TransCsvToTorch path not exist')
             return
@@ -45,19 +45,36 @@ class TransCsvToTorch:
         dataTbl.fillna(method = 'ffill', inplace = True)
         # 如果填补后仍然有NaN，可以再使用0进行填补
         dataTbl.fillna('0', inplace = True)
-        if isNeedRevert == True:
+        if isNeedRevert:
             dataTbl = dataTbl.T
         dataSet = dataTbl.values
         dataSet = dataSet[dataStartRank : , : ]
         self.data = TransNumpyToFloatTorch(dataSet[ : , dataStartCol : ], True)
         dateList = [x[0] for x in dataSet[ : , dateCol : dateCol + 1].tolist()]
+        if isSizeDown:
+            self.data = torch.flip(self.data, dims = [0])
+            dateList.reverse()
+        #print(f"dateList = {dateList}")
+        dateList = [date.replace('年', '-').replace('月份', '-01') if isinstance(date, str) else date for date in dateList]
         self.date = torch.randn(self.data.shape[0])
         if dateCol != 0xFFFFFFFF:
-            try:
-                date = pd.to_datetime(dateList, format = "%Y-%m-%d").astype('int64').values / 1000000000
+            if (type(dateList[0]) is str):
+                #print(f"dateList[0] = {type(dateList[0])}")
+                if (dateList[0].count('-') == 2):
+                    date = pd.to_datetime(dateList, format = "%Y-%m-%d").astype('int64').values / 1000000000
+                if (dateList[0].count('/') == 2):
+                    date = pd.to_datetime(dateList, format = "%Y/%m/%d").astype('int64').values / 1000000000
+                if (dateList[0].count('.') == 2):
+                    date = pd.to_datetime(dateList, format = "%Y.%m.%d").astype('int64').values / 1000000000
+                if (dateList[0].count('-') == 1):
+                    date = pd.to_datetime(dateList, format = "%Y-%m").astype('int64').values / 1000000000
+                if (dateList[0].count('/') == 1):
+                    date = pd.to_datetime(dateList, format = "%Y/%m").astype('int64').values / 1000000000
+                if (dateList[0].count('.') == 1):
+                    date = pd.to_datetime(dateList, format = "%Y.%m").astype('int64').values / 1000000000
                 torchDate = torch.IntTensor(date)
                 self.date = torchDate
-            except ValueError as e:
+            if (type(dateList[0]) is float):
                 dateList = [str(int(dateEle)) for dateEle in dateList]
                 date = pd.to_datetime(dateList, format = "%Y%m%d").astype('int64').values / 1000000000
                 torchDate = torch.IntTensor(date)
@@ -108,13 +125,14 @@ class TransTorchToCsv:
 #model.VerifyBpNetWork(verifyDataLoader)
 
 class BpNetWork(nn.Module):
-    def __init__(self, taskName, layersDim):
+    def __init__(self, taskName, layersDim, actFuncType = 'leakRelu'):
         super(BpNetWork, self).__init__()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.taskName = taskName
         self.device = device
         self.layers = nn.ModuleList([nn.Linear(layersDim[i - 1], size) for i, size in enumerate(layersDim) if i > 0]).to(self.device)
-        #self.relu = nn.ReLU().to(self.device)
+        self.actFuncType = actFuncType
+        self.relu = nn.ReLU().to(self.device)
         self.leakRelu = nn.LeakyReLU(negative_slope = 0.01).to(self.device)
         self.loss = 1000
         self.varMinusRst = 1000
@@ -122,10 +140,14 @@ class BpNetWork(nn.Module):
     def forward(self, inputData):
         outputData = inputData
         for layer in self.layers:
-            #outputData = self.relu(layer(outputData)).to(self.device)
-            outputData = self.leakRelu(layer(outputData)).to(self.device)
-            #outputData = torch.sigmoid(layer(outputData)).to(self.device)
-            #outputData = torch.tanh(layer(outputData)).to(self.device)
+            if (self.actFuncType == 'leakRelu'):
+                outputData = self.leakRelu(layer(outputData)).to(self.device)
+            if (self.actFuncType == 'relu'):
+                outputData = self.relu(layer(outputData)).to(self.device)
+            if (self.actFuncType == 'sigmoid'):
+                outputData = torch.sigmoid(layer(outputData)).to(self.device)
+            if (self.actFuncType == 'tanh'):
+                outputData = torch.tanh(layer(outputData)).to(self.device)
         return outputData
 
     def SetCriterion(self, func):
@@ -156,12 +178,12 @@ class BpNetWork(nn.Module):
                 loss.backward()
                 #torch.autograd.set_detect_anomaly(True)
                 self.optimizer.step()
+                self.loss = loss.item()
                 # 输出过程状态信息
                 if (i + 1) % statPeriod == 0:
                     print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], loss:{self.loss}")
                     checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.trainModule.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                     self.varMinusRst = varMinusRst
-                    self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -246,7 +268,7 @@ class SimpleRnnNetWork(nn.Module):
         self.loss = 1000
         self.varMinusRst = 1000
         self.trainModule = nn.RNN(trainDataDim, hiddenDim, batch_first = isBatchFirst).to(self.device)
-        self.fullConnectLayer = nn.Linear(hiddenDim, labelDataDim).to(self.device)
+        self.hidden2LabelDim = nn.Linear(hiddenDim, labelDataDim).to(self.device)
         '''
         if (isOutPut) and (oriTrainNum is not None) and (targetTrainNum is not None):
             #print(f"SimpleRnnNetWork labelDataDim = {labelDataDim}, oriTrainNum = {oriTrainNum}, targetTrainNum = {targetTrainNum}")
@@ -261,7 +283,7 @@ class SimpleRnnNetWork(nn.Module):
         out, hn = self.trainModule(inputData, h0)
         hn = hn[-1, : , : ].unsqueeze(1)
         hn = self.relu(hn)
-        hn = self.fullConnectLayer(hn)
+        hn = self.hidden2LabelDim(hn)
         return hn
 
     '''
@@ -269,7 +291,7 @@ class SimpleRnnNetWork(nn.Module):
         h0 = torch.zeros(1, inputData.size(0), self.hiddenDim).to(self.device)
         out, _ = self.trainModule(inputData, h0)
         out = F.silu(out)
-        out = self.fullConnectLayer(out)
+        out = self.hidden2LabelDim(out)
         out = F.silu(out)
         #print(f"SimpleRnnNetWork forward out = {out.shape}, self.isOutPut = {self.isOutPut}, self.labelDataDim = {self.labelDataDim}")
         if self.isOutPut and hasattr(self, 'seq_transform'):
@@ -323,12 +345,12 @@ class SimpleRnnNetWork(nn.Module):
                 loss.backward()
                 #torch.autograd.set_detect_anomaly(True)
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"TrainNeuralNetWork taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.trainModule.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 #print(f"TrainNeuralNetWork TrainNeuralNetWork checkRst = {checkRst}, varMinusRst = {varMinusRst}")
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -396,9 +418,7 @@ class ResidualRnnNetwork(nn.Module):
         self.loss = 1000
         self.varMinusRst = 1000
         self.isBidirectional = False
-        self.directionNum = 1
-        if self.isBidirectional:
-            self.directionNum = 2
+        self.directionNum = 2 if self.isBidirectional else 1
         self.oriTrainNum = 0
         self.targetTrainNum = 0
 
@@ -476,12 +496,12 @@ class ResidualRnnNetwork(nn.Module):
                 #torch.autograd.set_detect_anomaly(True)
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm = 10)
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"TrainNeuralNetWork taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.trainModule.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 print(f"TrainNeuralNetWork TrainNeuralNetWork checkRst = {checkRst}, varMinusRst = {varMinusRst}")
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -543,8 +563,7 @@ class TotalRnnNetWork(nn.Module):
         self.bh = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim)) for _ in range(layerNum)])
         self.loss = 1000
         self.varMinusRst = 1000
-        if (labelDataDim != 0):
-            self.fullConnectLayer = nn.Linear(hiddenDim, labelDataDim)  # 添加全连接层
+        self.hidden2LabelDim = nn.Linear(hiddenDim, labelDataDim)
         self.init_weights()
         self.to(self.device)  # 这将把所有的参数都移动到 self.device
 
@@ -555,16 +574,16 @@ class TotalRnnNetWork(nn.Module):
             nn.init.xavier_uniform_(self.bh[i])
 
     def forward(self, inputData, hidden=None):
-        # print(f"TotalRnnNetWork inputData = {inputData.shape}, inputMask = {inputMask.shape}")
+        # print(f"TotalRnnNetWork inputData = {inputData.shape}")
         if self.isBatchFirst:
             inputData = inputData.transpose(0, 1)  # [seq_len, batch_size, input_size]
-        seqLength, batchSize, _ = inputData.size()
+        trainDataNum, batchSize, _ = inputData.size()
         if hidden is None:
             hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
         else:
             hiddenStates = hidden
-        all_outputs = []  # 用于存储每个时间步的输出
-        for i in range(seqLength):
+        allOutputs = []  # 用于存储每个时间步的输出
+        for i in range(trainDataNum):
             inputStep = inputData[i]
             # 对于每一层 RNN，更新 hiddenStates和cellStates
             new_hiddenStates = []
@@ -574,14 +593,13 @@ class TotalRnnNetWork(nn.Module):
                 new_hiddenStates.append(new_hidden)
                 inputStep = new_hidden  # 为下一层更新inputStep
             hiddenStates = new_hiddenStates  # 更新所有层的状态
-            all_outputs.append(new_hiddenStates[-1])  # 记录最后一层的输出
-        out = torch.stack(all_outputs, dim=0)
+            allOutputs.append(new_hiddenStates[-1])  # 记录最后一层的输出
+        out = torch.stack(allOutputs, dim=0)
         hn = torch.stack(hiddenStates, dim=0)  # Shape: [num_layers, batch_size, hiddenDim]
         if self.isBatchFirst:
             out = out.transpose(0, 1)
             hn = hn.transpose(0, 1)
-        if (self.labelDataDim != 0):
-            hn = self.fullConnectLayer(hn)
+        #hn = self.hidden2LabelDim(hn)
         # print(f"TotalRnnNetWork out = {out.shape}, hn = {hn.shape}, cn = {cn.shape}")
         # return out, hn
         return hn
@@ -610,11 +628,11 @@ class TotalRnnNetWork(nn.Module):
                 #print(f"TrainNeuralNetWork output = {output}, labelData = {labelData}")
                 loss.backward(retain_graph = True)
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -664,18 +682,16 @@ class SimpleLstmNetWork(nn.Module):
         self.isBatchFirst = isBatchFirst
         self.isNeedHidden = isNeedHidden
         self.isOutPut = isOutPut
+        self.isBidirectional = isBiDirectional
+        self.directionNum = 2 if self.isBidirectional else 1
         self.trainDataDim = trainDataDim
         self.labelDataDim = labelDataDim
         self.hiddenDim = hiddenDim
-        self.isBidirectional = isBiDirectional
-        self.directionNum = 1
-        if self.isBidirectional:
-            self.directionNum = 2
         self.layerNum = layerNum
         self.batchSize = batchSize
+        self.relu = nn.ReLU()
         self.loss = 1000
         self.varMinusRst = 1000
-
         self.trainModule = nn.LSTM(hiddenDim, hiddenDim, layerNum, bidirectional = self.isBidirectional, batch_first = isBatchFirst).to(self.device)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropRate)
@@ -696,11 +712,12 @@ class SimpleLstmNetWork(nn.Module):
         '''
 
         #print(f"SimpleLstmNetWork forward inputData = {inputData.shape}, trainDataDim = {self.trainDataDim}, hiddenDim = {self.hiddenDim}, labelDataDim = {self.labelDataDim}")
+        #for name, param in self.trainModule.named_parameters():
+        #    print(f"SimpleLstmNetWork name = {name}, param = {param.shape}")
         batchSize = inputData.shape[0]
         h0 = torch.zeros(self.layerNum * self.directionNum, batchSize, self.trainModule.hidden_size).to(self.device)
         c0 = torch.zeros(self.layerNum * self.directionNum, batchSize, self.trainModule.hidden_size).to(self.device)
         out, (hn, cn) = self.trainModule(inputData, (h0, c0))
-
         hn = self.dropout(hn)
         cn = self.dropout(cn)
         out = self.dropout(out)
@@ -712,7 +729,6 @@ class SimpleLstmNetWork(nn.Module):
             hn = hn.transpose(1, 2)
             hn = self.direction2One(hn)
             hn = hn.transpose(1, 2)
-
             cn = cn.transpose(1, 2)
             cn = self.direction2One(cn)
             cn = cn.transpose(1, 2)
@@ -771,12 +787,12 @@ class SimpleLstmNetWork(nn.Module):
                 loss.backward()
                 #torch.autograd.set_detect_anomaly(True)
                 self.optimizer.step()
+                self.loss = loss.item()
             if ((epoch + 1) % statPeriod == 0) and (not isDataEmpty):
                 print(f"TrainNeuralNetWork taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.trainModule.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 #print(f"TrainNeuralNetWork TrainNeuralNetWork checkRst = {checkRst}, varMinusRst = {varMinusRst}")
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -788,7 +804,7 @@ class SimpleLstmNetWork(nn.Module):
     def GetModuleCalcRst(self, verifyData):
         with torch.no_grad():
             verifyData = verifyData.to(self.device)
-            output = self.forward(verifyData)
+            output, (hn, cn) = self.forward(verifyData)
             return output, self.varMinusRst.item()
 
 def HandleSimpleLstmNetWorkProcess(taskName, isBatchFirst, isNeedHidden, isOutput, trainData, labelData, hiddenDim, layerNum, batchSize, epochNum, learnRate, weightDecay, statPeriod, modulePath):
@@ -830,25 +846,29 @@ class TotalLstmNetWork(nn.Module):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.taskName = taskName
         self.isBatchFirst = isBatchFirst
+        self.isOutput = isOutput
+        self.isBidirectional = isBidirectional
+        self.directionNum = 2 if self.isBidirectional else 1
+        self.labelDataDim = labelDataDim
         self.hiddenDim = hiddenDim
         self.layerNum = layerNum
         self.batchSize = batchSize
-        self.isBidirectional = isBidirectional
-        self.directions = 2 if isBidirectional else 1
-        self.Wi = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directions)])
-        self.Wf = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directions)])
-        self.Wo = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directions)])
-        self.Wg = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directions)])
-        self.Ui = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directions)])
-        self.Uf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directions)])
-        self.Uo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directions)])
-        self.Ug = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directions)])
+
+        self.Wi = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Wf = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Wo = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Wg = nn.ParameterList([nn.Parameter(torch.randn(trainDataDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Ui = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
+        self.Uf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
+        self.Uo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
+        self.Ug = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
 
         self.loss = 1000
         self.varMinusRst = 1000
-        self.fullConnectLayer = nn.Linear(hiddenDim * self.directions, labelDataDim)
+        self.direction2One = nn.Linear(self.layerNum * self.directionNum, 1)
+        self.biHidden2HiddenDim = nn.Linear(self.directionNum * self.hiddenDim, self.hiddenDim)
+        self.hidden2LabelDim = nn.Linear(hiddenDim, labelDataDim).to(self.device)
         self.dropout = nn.Dropout(dropRate)
-
         self.oriTrainNum = oriTrainNum
         self.targetTrainNum = targetTrainNum
 
@@ -862,7 +882,7 @@ class TotalLstmNetWork(nn.Module):
         self.to(self.device)
 
     def init_weights(self):
-        for i in range(self.layerNum * self.directions):
+        for i in range(self.layerNum * self.directionNum):
             nn.init.xavier_uniform_(self.Wi[i])
             nn.init.xavier_uniform_(self.Wf[i])
             nn.init.xavier_uniform_(self.Wo[i])
@@ -875,74 +895,75 @@ class TotalLstmNetWork(nn.Module):
     def forward(self, inputData, hidden = None):
         if self.isBatchFirst:
             inputData = inputData.transpose(0, 1)  # [seq_len, batch_size, input_size]
-        seqLength, batchSize, _ = inputData.size()
+        trainDataNum, batchSize, trainDataDim = inputData.size()
         if hidden is None:
-            hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum * self.directions)]
-            cellStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum * self.directions)]
+            hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum * self.directionNum)]
+            cellStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum * self.directionNum)]
         else:
             hiddenStates, cellStates = hidden
 
         # 正向和反向的输入数据
-        forward_input = inputData
+        forwardInput = inputData
         if (self.isBidirectional):
-            backward_input = inputData.flip(0)
+            backwardInput = inputData.flip(0)
 
-        all_outputs = []  # 用于存储每个时间步的输出
-        for i in range(seqLength):
-            forward_step = forward_input[i]
+        allOutputs = []  # 用于存储每个时间步的输出
+        for i in range(trainDataNum):
+            forwardStep = forwardInput[i]
             if (self.isBidirectional):
-                backward_step = backward_input[i]
+                backwardStep = backwardInput[i]
 
             # 对于每一层 LSTM，更新正向和反向的 hiddenStates 和 cellStates
-            for layer in range(self.layerNum):
+            for layerIndex in range(self.layerNum):
                 # 正向
-                forward_prev_hidden = hiddenStates[layer]
-                forward_prev_cell = cellStates[layer]
-                forward_cell_states = torch.sigmoid(forward_step @ self.Wi[layer] + forward_prev_hidden @ self.Ui[layer])
-                forward_forget_gate = torch.sigmoid(forward_step @ self.Wf[layer] + forward_prev_hidden @ self.Uf[layer])
-                forward_output_gate = torch.sigmoid(forward_step @ self.Wo[layer] + forward_prev_hidden @ self.Uo[layer])
-                forward_choice_gate = torch.tanh(forward_step @ self.Wg[layer] + forward_prev_hidden @ self.Ug[layer])
-                cellStates[layer] = forward_forget_gate * forward_prev_cell + forward_cell_states * forward_choice_gate
-                hiddenStates[layer] = forward_output_gate * torch.tanh(cellStates[layer])
-                forward_step = hiddenStates[layer]
-
+                forwardStep, hiddenStates, cellStates = self.HandleLstmInputStep(forwardStep, layerIndex, hiddenStates, cellStates)
                 if (self.isBidirectional):
                     # 反向
-                    backward_layer_index = layer + self.layerNum
-                    backward_prev_hidden = hiddenStates[backward_layer_index]
-                    backward_prev_cell = cellStates[backward_layer_index]
-                    backward_cell_states = torch.sigmoid(backward_step @ self.Wi[backward_layer_index] + backward_prev_hidden @ self.Ui[backward_layer_index])
-                    backward_forget_gate = torch.sigmoid(backward_step @ self.Wf[backward_layer_index] + backward_prev_hidden @ self.Uf[backward_layer_index])
-                    backward_output_gate = torch.sigmoid(backward_step @ self.Wo[backward_layer_index] + backward_prev_hidden @ self.Uo[backward_layer_index])
-                    backward_choice_gate = torch.tanh(backward_step @ self.Wg[backward_layer_index] + backward_prev_hidden @ self.Ug[backward_layer_index])
-                    cellStates[backward_layer_index] = backward_forget_gate * backward_prev_cell + backward_cell_states * backward_choice_gate
-                    hiddenStates[backward_layer_index] = backward_output_gate * torch.tanh(cellStates[backward_layer_index])
-                    backward_step = hiddenStates[backward_layer_index]
+                    backwardLayerIndex = layerIndex + self.layerNum
+                    backwardStep, hiddenStates, cellStates = self.HandleLstmInputStep(backwardStep, backwardLayerIndex, hiddenStates, cellStates)
 
             # 将正向和反向的输出拼接在一起
             if (self.isBidirectional):
-                final_output = torch.cat((forward_step, backward_step), dim = 1)
+                finalOutput = torch.cat((forwardStep, backwardStep), dim = 1)
             else:
-                final_output = forward_step
-            all_outputs.append(final_output)
-            
-        out = torch.stack(all_outputs, dim = 0)
-        hn = torch.stack(hiddenStates, dim = 0)  # Shape: [num_layers * directions, batch_size, hiddenDim]
-        cn = torch.stack(cellStates, dim = 0)  # Shape: [num_layers * directions, batch_size, hiddenDim]
+                finalOutput = forwardStep
+            allOutputs.append(finalOutput)
+
+        out = torch.stack(allOutputs, dim=0)
+        hn = torch.stack(hiddenStates, dim=0)  # Shape: [num_layers * directionNum, batch_size, hiddenDim]
+        cn = torch.stack(cellStates, dim=0)  # Shape: [num_layers * directionNum, batch_size, hiddenDim]
         if self.isBatchFirst:
             out = out.transpose(0, 1)
             hn = hn.transpose(0, 1)
             cn = cn.transpose(0, 1)
         out = self.dropout(out)
-        if self.isOutput and hasattr(self, 'seq_transform'):
-            # 将 (batch, seq_len, output_dim) 转换为 (batch, seq_len * output_dim)
-            #print(f"TotalLstmNetWork out = {out.shape}, labelDataDim = {self.labelDataDim}, oriTrainNum = {self.oriTrainNum}, targetTrainNum = {self.targetTrainNum}")
-            out = out.view(batchSize, -1)
-            out = self.seq_transform(out)
-            out = out.view(batchSize, self.targetTrainNum, -1)
-        hn = self.fullConnectLayer(hn)
+        if (self.layerNum > 1) or (self.directionNum > 1):
+            hn = hn.transpose(1, 2)
+            hn = self.direction2One(hn)
+            hn = hn.transpose(1, 2)
+            cn = cn.transpose(1, 2)
+            cn = self.direction2One(cn)
+            cn = cn.transpose(1, 2)
+            out = self.biHidden2HiddenDim(out)
+        #hn = self.hidden2LabelDim(hn)
+        if (self.isOutput) and hasattr(self, 'ori2TargetNum'):
+            out = out.transpose(1, 2)
+            out = self.ori2TargetNum(out)
+            out = out.transpose(1, 2)
         #print(f"TotalLstmNetWork out = {out.shape}, hn = {hn.shape}, cn = {cn.shape}")
         return out, (hn, cn)
+
+    def HandleLstmInputStep(self, inputStep, layerIndex, hiddenStates, cellStates):
+        prevHidden = hiddenStates[layerIndex]
+        prevCell = cellStates[layerIndex]
+        cellState = torch.sigmoid(inputStep @ self.Wi[layerIndex] + prevHidden @ self.Ui[layerIndex])
+        forgetGate = torch.sigmoid(inputStep @ self.Wf[layerIndex] + prevHidden @ self.Uf[layerIndex])
+        outputGate = torch.sigmoid(inputStep @ self.Wo[layerIndex] + prevHidden @ self.Uo[layerIndex])
+        choiceGate = torch.tanh(inputStep @ self.Wg[layerIndex] + prevHidden @ self.Ug[layerIndex])
+        cellStates[layerIndex] = forgetGate * prevCell + cellState * choiceGate
+        hiddenStates[layerIndex] = outputGate * torch.tanh(cellStates[layerIndex])
+        inputStep = hiddenStates[layerIndex]
+        return inputStep, hiddenStates, cellStates
 
     def SetCriterion(self, func):
         self.criterion = func
@@ -968,11 +989,11 @@ class TotalLstmNetWork(nn.Module):
                 loss = self.criterion(output, labelData)
                 loss.backward()
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -1007,185 +1028,6 @@ def HandleTotalLstmNetWorkProcess(taskName, isBatchFirst, isOutput, isBidirectio
     return model
 
 # Total LSTM 模型框架实现 end
-
-# Mask Res 模型框架实现 begin
-
-#调用方法如下例：
-#model = HandleMaskResNetWorkProcess(taskName, True, trainData, labelData, trainDataDim, labelDataDim, hiddenDim, layerNum, headNum, dropOut, batchSize, epochNum, learnRate, weightDecay, statPeriod, modulePath)
-# 定义 MaskRes 模型并放到 GPU 上
-#model.GetModuleCalcRst(verifyData)
-
-class MaskResNetWork(nn.Module):
-    def __init__(self, taskName, isBatchFirst, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate):
-        super(MaskResNetWork, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.taskName = taskName
-        self.isBatchFirst = isBatchFirst
-        self.trainDataDim = trainDataDim
-        self.hiddenDim = hiddenDim
-        self.layerNum = layerNum
-        self.batchSize = batchSize
-        self.Wi = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Wf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Wo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Wg = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Ui = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Uf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Uo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Ug = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.loss = 1000
-        self.varMinusRst = 1000
-
-        self.transInputDataDim = nn.Linear(trainDataDim, hiddenDim)
-        self.transDataDim = nn.Linear(hiddenDim, labelDataDim)
-        self.transDataNum = nn.Linear(layerNum, 1)
-        self.dropout = nn.Dropout(dropRate)
-        self.init_weights()
-        self.to(self.device)
-
-    def init_weights(self):
-        for i in range(self.layerNum):
-            nn.init.xavier_uniform_(self.Wi[i])
-            nn.init.xavier_uniform_(self.Wf[i])
-            nn.init.xavier_uniform_(self.Wo[i])
-            nn.init.xavier_uniform_(self.Wg[i])
-            nn.init.xavier_uniform_(self.Ui[i])
-            nn.init.xavier_uniform_(self.Uf[i])
-            nn.init.xavier_uniform_(self.Uo[i])
-            nn.init.xavier_uniform_(self.Ug[i])
-
-    def forward(self, inputData, inputMask, hidden = None):
-        #print(f"MaskResNetWork inputData = {inputData.shape}, inputMask = {inputMask.shape}, self.batchSize = {self.batchSize}")
-        if (inputData.shape[2] == self.trainDataDim):
-            inputData = self.transInputDataDim(inputData)
-        #'''
-        oriDataNum = 0
-        if (inputData.shape[0] < self.batchSize * 2) or (inputMask.shape[0] < self.batchSize * 2):
-            oriDataNum = inputData.shape[0]
-            padInputData = torch.zeros(self.batchSize * 2 - inputData.shape[0], inputData.shape[1], inputData.shape[2]).to(self.device)
-            padInputMask = torch.zeros(self.batchSize * 2 - inputMask.shape[0], inputMask.shape[1]).to(self.device)
-            inputData = AddDataToTorch(inputData, padInputData, 0)
-            inputMask = AddDataToTorch(inputMask, padInputMask, 0)
-        #'''
-        if self.isBatchFirst:
-            inputData = inputData.transpose(0, 1)  # [seq_len, batch_size, input_size]
-            inputMask = inputMask.transpose(0, 1)
-        reInputMask = torch.ones(inputMask.shape[0], inputMask.shape[1]).to(self.device) - inputMask
-        seqLength, batchSize, _ = inputData.size()
-        if hidden is None:
-            hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
-            cellStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
-        else:
-            hiddenStates, cellStates = hidden
-        all_outputs = []  # 用于存储每个时间步的输出
-        for i in range(seqLength):
-            inputStep = inputData[i]
-            maskStep = inputMask[i]
-            reMaskStep = reInputMask[i]
-            maskStep = maskStep.unsqueeze(1).expand(maskStep.shape[0], self.hiddenDim)
-            #print(f"MaskResNetWork inputStep = {inputStep.shape}, maskStep = {maskStep.shape}")
-            reverseMaskStep = reMaskStep.unsqueeze(1).expand(reMaskStep.shape[0], self.hiddenDim)
-            # 对于每一层 LSTM，更新 hiddenStates 和 cellStates
-            for layer in range(self.layerNum):
-                curCellStates = nn.functional.gelu(inputStep @ self.Wi[layer] + hiddenStates[layer] @ self.Ui[layer])
-                #outputGate = nn.functional.gelu(inputStep @ self.Wo[layer] + hiddenStates[layer] @ self.Uo[layer])
-                cellStates[layer] = reverseMaskStep * cellStates[layer] + maskStep * curCellStates
-                #hiddenStates[layer] = nn.functional.gelu(outputGate * cellStates[layer])
-                hiddenStates[layer] = nn.functional.gelu(cellStates[layer])
-                #hiddenStates[layer] = cellStates[layer]
-                # 下一层的输入是当前层的输出
-                inputStep = hiddenStates[layer]
-            # 记录每个时间步的输出（使用最后一层的输出作为标准输出）
-            final_output = hiddenStates[-1]
-            all_outputs.append(final_output)
-        out = torch.stack(all_outputs, dim = 0)
-        hn = torch.stack(hiddenStates, dim = 0)  # Shape: [num_layers, batch_size, hiddenDim]
-        cn = torch.stack(cellStates, dim = 0)  # Shape: [num_layers, batch_size, hiddenDim]
-        hn = self.dropout(hn)
-        out = self.dropout(out)
-        if self.isBatchFirst:
-            out = out.transpose(0, 1)
-            hn = hn.transpose(0, 1)
-            cn = cn.transpose(0, 1)
-        if (self.layerNum > 1):
-            hn = hn.transpose(1, 2)
-            hn = self.transDataNum(hn)
-            hn = hn.transpose(1, 2)
-        #out = self.transDataDim(out)
-        #hn = self.transDataDim(hn)
-        #cn = self.transDataDim(cn)
-        #'''
-        if (oriDataNum != 0):
-            out = out[0 : oriDataNum, : , : ]
-            hn = hn[0 : oriDataNum, : , : ]
-            cn = cn[0 : oriDataNum, : , : ]
-        #'''
-        #print(f"MaskResNetWork out = {out.shape}, hn = {hn.shape}, cn = {cn.shape}")
-        return out, (hn, cn)
-
-    def SetCriterion(self, func):
-        self.criterion = func
-
-    def SetOptimizer(self, func):
-        self.optimizer = func
-
-    def SetTrainDataInfo(self, inputData, labelData):
-        # 将数据转换为 PyTorch Dataset 对象并放到 GPU 上
-        data = TensorDataset(inputData.to(self.device), labelData.to(self.device))
-        # 加载数据并自动进行批处理
-        self.dataloader = DataLoader(data, batch_size = self.batchSize, shuffle = False)
-
-    def TrainNeuralNetWork(self, epochNum, statPeriod):
-        # 模型训练
-        for epoch in range(epochNum):
-            initParam = {name: torch.zeros_like(param, device = self.device) for name, param in self.named_parameters()}
-            lastAverage = {name: value.to(self.device) for name, value in initParam.items()}
-            lastVar = {name: value.to(self.device) for name, value in initParam.items()}
-            for trainData, labelData in self.dataloader:
-                self.optimizer.zero_grad()
-                output = self.forward(trainData)
-                loss = self.criterion(output, labelData)
-                loss.backward()
-                self.optimizer.step()
-            if (epoch + 1) % statPeriod == 0:
-                print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
-                checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
-                self.varMinusRst = varMinusRst
-                self.loss = loss.item()
-            #if checkRst:
-            #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
-            #    break
-        #print(f"TrainNeuralNetWork false stop, varThreshold = {varThreshold}")
-
-    def GetModuleCalcRst(self, verifyData):
-        #模型预测
-        with torch.no_grad():
-            verifyData = verifyData.to(self.device)
-            output = self.forward(verifyData)
-            return output.cpu(), self.varMinusRst.item()
-
-def HandleMaskResNetWorkProcess(taskName, isBatchFirst, trainData, labelData, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate, epochNum, learnRate, weightDecay, statPeriod, modulePath):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"trainData = {trainData.shape}, labelData = {labelData.shape}, trainDataDim = {trainDataDim}, labelDataDim = {labelDataDim}, hiddenDim = {hiddenDim}, batchSize = {batchSize}")
-    model = MaskResNetWork(taskName, isBatchFirst, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate).to(device)
-    if os.path.exists(modulePath):
-        checkpoint = torch.load(modulePath)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.varMinusRst = checkpoint['varMinusRst']
-        model.loss = checkpoint['loss']
-        if (model.loss < 30) and (model.varMinusRst.item() < 20):
-            return model
-    print(f"HandleMaskResNetWorkProcess path not exist, path = {modulePath}")
-    model.SetCriterion(nn.MSELoss())
-    #model.SetCriterion(nn.CrossEntropyLoss())
-    model.SetOptimizer(torch.optim.Adam(model.parameters(), lr = learnRate, weight_decay = weightDecay))
-    model.to(device)
-    model.SetTrainDataInfo(trainData, labelData)
-    model.TrainNeuralNetWork(epochNum, statPeriod)
-    torch.save({'model_state_dict': model.state_dict(), 'varMinusRst': model.varMinusRst, 'loss': model.loss}, modulePath)
-    return model
-
-# Mask Res 模型框架实现 end
 
 # Mask LSTM 模型框架实现 begin
 
@@ -1254,14 +1096,14 @@ class MaskLstmNetWork(nn.Module):
             inputMask = inputMask.transpose(0, 1)
         #inputMask = torch.sigmoid(self.transMask(inputMask))
         reInputMask = torch.ones(inputMask.shape[0], inputMask.shape[1]).to(self.device) - inputMask
-        seqLength, batchSize, _ = inputData.size()
+        trainDataNum, batchSize, _ = inputData.size()
         if hidden is None:
             hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
             cellStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
         else:
             hiddenStates, cellStates = hidden
-        all_outputs = []  # 用于存储每个时间步的输出
-        for i in range(seqLength):
+        allOutputs = []  # 用于存储每个时间步的输出
+        for i in range(trainDataNum):
             inputStep = inputData[i]
             maskStep = inputMask[i]
             reMaskStep = reInputMask[i]
@@ -1283,9 +1125,9 @@ class MaskLstmNetWork(nn.Module):
                 # 下一层的输入是当前层的输出
                 inputStep = hiddenStates[layer]
             # 记录每个时间步的输出（使用最后一层的输出作为标准输出）
-            final_output = hiddenStates[-1]
-            all_outputs.append(final_output)
-        out = torch.stack(all_outputs, dim = 0)
+            finalOutput = hiddenStates[-1]
+            allOutputs.append(finalOutput)
+        out = torch.stack(allOutputs, dim = 0)
         hn = torch.stack(hiddenStates, dim = 0)  # Shape: [num_layers, batch_size, hiddenDim]
         cn = torch.stack(cellStates, dim = 0)  # Shape: [num_layers, batch_size, hiddenDim]
         hn = self.dropout(hn)
@@ -1334,11 +1176,11 @@ class MaskLstmNetWork(nn.Module):
                 loss = self.criterion(output, labelData)
                 loss.backward()
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -1374,196 +1216,6 @@ def HandleMaskLstmNetWorkProcess(taskName, isBatchFirst, trainData, labelData, t
 
 # Mask LSTM 模型框架实现 end
 
-# Mem Rnn 模型框架实现 begin
-
-#调用方法如下例：
-#model = HandleMemRnnNetWorkProcess(taskName, True, trainData, labelData, trainDataDim, labelDataDim, hiddenDim, layerNum, headNum, dropOut, batchSize, epochNum, learnRate, weightDecay, statPeriod, modulePath)
-# 定义 MemRnn 模型并放到 GPU 上
-#model.GetModuleCalcRst(verifyData)
-
-class MemRnnNetWork(nn.Module):
-    def __init__(self, taskName, isBatchFirst, isNeedMaskMem, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate):
-        super(MemRnnNetWork, self).__init__()
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.taskName = taskName
-        self.isBatchFirst = isBatchFirst
-        self.trainDataDim = trainDataDim
-        self.hiddenDim = hiddenDim
-        self.layerNum = layerNum
-        self.batchSize = batchSize
-        self.Wi = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)]).to(self.device)
-        self.Wo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)]).to(self.device)
-        self.Ui = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)]).to(self.device)
-        self.Uo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)]).to(self.device)
-        self.loss = 1000
-        self.varMinusRst = 1000
-
-        #self.reslinear = nn.Linear(hiddenDim, hiddenDim)
-        self.inputToHiddenDim = nn.Linear(trainDataDim, hiddenDim)
-        #self.transDataDim = nn.Linear(hiddenDim, labelDataDim)
-        self.transDataNum = nn.Linear(layerNum, 1)
-        self.memMaskWi = None
-        self.memMaskUi = None
-        self.dropout = nn.Dropout(dropRate)
-        self.init_weights()
-        self.to(self.device)
-
-    def init_weights(self):
-        for i in range(self.layerNum):
-            nn.init.xavier_uniform_(self.Wi[i])
-            nn.init.xavier_uniform_(self.Wo[i])
-            nn.init.xavier_uniform_(self.Ui[i])
-            nn.init.xavier_uniform_(self.Uo[i])
-
-    def forward(self, inputData, inputMask, hidden = None):
-        #print(f"MemRnnNetWork inputData = {inputData.shape}, self.trainDataDim = {self.trainDataDim}, self.hiddenDim = {self.hiddenDim}, self.batchSize = {self.batchSize}")
-        if (inputData.shape[2] == self.trainDataDim):
-            inputData = self.inputToHiddenDim(inputData)
-        '''
-        oriDataNum = 0
-        if (inputData.shape[0] < self.batchSize * 2):
-            oriDataNum = inputData.shape[0]
-            padInputData = torch.zeros(self.batchSize * 2 - inputData.shape[0], inputData.shape[1], inputData.shape[2]).to(self.device)
-            inputData = AddDataToTorch(inputData, padInputData, 0)
-        '''
-        if self.isBatchFirst:
-            inputData = inputData.transpose(0, 1)  # [seq_len, batch_size, input_size]
-            #inputMask = inputMask.transpose(0, 1)
-        #inputDataRes = self.reslinear(inputData)
-        #reInputMask = torch.ones(inputMask.shape[0], inputMask.shape[1]).to(self.device) - inputMask
-        seqLength, batchSize, _ = inputData.size()
-        if hidden is None:
-            hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
-            #cellStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
-        else:
-            hiddenStates = hidden
-        all_outputs = []  # 用于存储每个时间步的输出
-        for i in range(seqLength):
-            inputStep = inputData[i]
-            #inputRes = inputDataRes[i]
-            #maskStep = inputMask[i]
-            #reMaskStep = reInputMask[i]
-            #maskStep = maskStep.unsqueeze(1).expand(maskStep.shape[0], self.hiddenDim)
-            #reverseMaskStep = reMaskStep.unsqueeze(1).expand(reMaskStep.shape[0], self.hiddenDim)
-            #print(f"MemRnnNetWork inputStep = {inputStep.shape}")
-            # 对于每一层 LSTM，更新 hiddenStates
-            for layer in range(self.layerNum):
-                if (self.memMaskWi is None) or ((self.memMaskUi is None)):
-                    self.memMaskWi = torch.randn(inputStep.shape[0], 1).to(self.device)
-                    self.memMaskUi = torch.randn(inputStep.shape[0], 1).to(self.device)
-                else:
-                    if (self.memMaskWi.shape[0] == self.memMaskUi.shape[0]):
-                        if (self.memMaskWi.shape[0] < inputStep.shape[0]) and (inputStep.shape[0] % self.memMaskWi.shape[0] == 0):
-                            self.memMaskWi = self.memMaskWi.repeat(int(inputStep.shape[0] / self.memMaskWi.shape[0]), 1)
-                            self.memMaskUi = self.memMaskUi.repeat(int(inputStep.shape[0] / self.memMaskUi.shape[0]), 1)
-                        elif (self.memMaskWi.shape[0] > inputStep.shape[0]) and (self.memMaskWi.shape[0] % inputStep.shape[0] == 0):
-                            self.memMaskWi = self.memMaskWi[0 : inputStep.shape[0], : ]
-                            self.memMaskUi = self.memMaskUi[0: inputStep.shape[0], :]
-                        elif (self.memMaskWi.shape[0] != inputStep.shape[0]):
-                            print(f"MemRnnNetWork inputStep = {inputStep.shape}, self.memMaskWi = {self.memMaskWi.shape}, self.memMaskUi = {self.memMaskUi.shape}")
-                    else:
-                        print(f"MemRnnNetWork inputStep = {inputStep.shape}, self.memMaskWi = {self.memMaskWi.shape}, self.memMaskUi = {self.memMaskUi.shape}")
-                activeMemMaskWi = torch.sigmoid((inputStep.transpose(0, 1) @ self.memMaskWi).squeeze(1))
-                activeMemMaskUi = torch.sigmoid((inputStep.transpose(0, 1) @ self.memMaskUi).squeeze(1))
-                curCellStates = nn.functional.gelu(inputStep @ (activeMemMaskWi * self.Wi[layer]) + hiddenStates[layer] @ (activeMemMaskUi * self.Ui[layer]))
-                curCellStates = torch.clamp(curCellStates, min = -1, max = 1)
-                #cellStates[layer] = reverseMaskStep * cellStates[layer] + maskStep * curCellStates
-                #outputGate = nn.functional.gelu(inputStep @ self.Wo[layer] + hiddenStates[layer] @ self.Uo[layer])
-                #hiddenStates[layer] = nn.functional.gelu(outputGate * cellStates[layer])
-                #hiddenStates[layer] = nn.functional.gelu(cellStates[layer])
-                hiddenStates[layer] = nn.functional.gelu(curCellStates)
-                # 下一层的输入是当前层的输出
-                inputStep = hiddenStates[layer]
-            # 记录每个时间步的输出（使用最后一层的输出作为标准输出）
-            final_output = hiddenStates[-1]
-            #final_output = final_output + inputRes
-            all_outputs.append(final_output)
-        out = torch.stack(all_outputs, dim = 0)
-        hn = torch.stack(hiddenStates, dim = 0)  # Shape: [num_layers, batch_size, hiddenDim]
-        hn = self.dropout(hn)
-        out = self.dropout(out)
-        if self.isBatchFirst:
-            out = out.transpose(0, 1)
-            hn = hn.transpose(0, 1)
-        if (self.layerNum > 1):
-            hn = hn.transpose(1, 2)
-            hn = self.transDataNum(hn)
-            hn = hn.transpose(1, 2)
-        #out = self.transDataDim(out)
-        #hn = self.transDataDim(hn)
-        #cn = self.transDataDim(cn)
-        '''
-        if (oriDataNum != 0):
-            out = out[0 : oriDataNum, : , : ]
-            hn = hn[0 : oriDataNum, : , : ]
-        '''
-        #print(f"MemRnnNetWork out = {out.shape}, hn = {hn.shape}")
-        return out, (hn, None)
-
-    def SetCriterion(self, func):
-        self.criterion = func
-
-    def SetOptimizer(self, func):
-        self.optimizer = func
-
-    def SetTrainDataInfo(self, inputData, labelData):
-        # 将数据转换为 PyTorch Dataset 对象并放到 GPU 上
-        data = TensorDataset(inputData.to(self.device), labelData.to(self.device))
-        # 加载数据并自动进行批处理
-        self.dataloader = DataLoader(data, batch_size = self.batchSize, shuffle = False)
-
-    def TrainNeuralNetWork(self, epochNum, statPeriod):
-        # 模型训练
-        for epoch in range(epochNum):
-            initParam = {name: torch.zeros_like(param, device = self.device) for name, param in self.named_parameters()}
-            lastAverage = {name: value.to(self.device) for name, value in initParam.items()}
-            lastVar = {name: value.to(self.device) for name, value in initParam.items()}
-            for trainData, labelData in self.dataloader:
-                self.optimizer.zero_grad()
-                output = self.forward(trainData, None)
-                loss = self.criterion(output, labelData)
-                loss.backward()
-                self.optimizer.step()
-            if (epoch + 1) % statPeriod == 0:
-                print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
-                checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
-                self.varMinusRst = varMinusRst
-                self.loss = loss.item()
-            #if checkRst:
-            #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
-            #    break
-        #print(f"TrainNeuralNetWork false stop, varThreshold = {varThreshold}")
-
-    def GetModuleCalcRst(self, verifyData):
-        #模型预测
-        with torch.no_grad():
-            verifyData = verifyData.to(self.device)
-            output = self.forward(verifyData)
-            return output.cpu(), self.varMinusRst.item()
-
-def HandleMemRnnNetWorkProcess(taskName, isBatchFirst, trainData, labelData, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate, epochNum, learnRate, weightDecay, statPeriod, modulePath):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"trainData = {trainData.shape}, labelData = {labelData.shape}, trainDataDim = {trainDataDim}, labelDataDim = {labelDataDim}, hiddenDim = {hiddenDim}, batchSize = {batchSize}")
-    model = MemRnnNetWork(taskName, isBatchFirst, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate).to(device)
-    if os.path.exists(modulePath):
-        checkpoint = torch.load(modulePath)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model.varMinusRst = checkpoint['varMinusRst']
-        model.loss = checkpoint['loss']
-        if (model.loss < 30) and (model.varMinusRst.item() < 20):
-            return model
-    print(f"HandleMemRnnNetWorkProcess path not exist, path = {modulePath}")
-    model.SetCriterion(nn.MSELoss())
-    #model.SetCriterion(nn.CrossEntropyLoss())
-    model.SetOptimizer(torch.optim.Adam(model.parameters(), lr = learnRate, weight_decay = weightDecay))
-    model.to(device)
-    model.SetTrainDataInfo(trainData, labelData)
-    model.TrainNeuralNetWork(epochNum, statPeriod)
-    torch.save({'model_state_dict': model.state_dict(), 'varMinusRst': model.varMinusRst, 'loss': model.loss}, modulePath)
-    return model
-
-# Mem Rnn 模型框架实现 end
-
 # Mem Lstm 模型框架实现 begin
 
 #调用方法如下例：
@@ -1572,40 +1224,46 @@ def HandleMemRnnNetWorkProcess(taskName, isBatchFirst, trainData, labelData, tra
 #model.GetModuleCalcRst(verifyData)
 
 class MemLstmNetWork(nn.Module):
-    def __init__(self, taskName, isBatchFirst, isNeedMaskMem, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate):
+    def __init__(self, taskName, isBatchFirst, isBidirectional, trainDataDim, labelDataDim, hiddenDim, layerNum, batchSize, dropRate):
         super(MemLstmNetWork, self).__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.taskName = taskName
         self.isBatchFirst = isBatchFirst
+        self.isBidirectional = isBidirectional
+        self.directionNum = 2 if self.isBidirectional else 1
+        
         self.trainDataDim = trainDataDim
         self.hiddenDim = hiddenDim
         self.layerNum = layerNum
         self.batchSize = batchSize
-        self.Wi = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Wf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Wo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Wg = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Ui = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Uf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Uo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
-        self.Ug = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum)])
+
+        self.Wi = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Wf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Wo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Wg = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim if i == 0 else hiddenDim, hiddenDim)) for i in range(layerNum * self.directionNum)])
+        self.Ui = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
+        self.Uf = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
+        self.Uo = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
+        self.Ug = nn.ParameterList([nn.Parameter(torch.randn(hiddenDim, hiddenDim)) for _ in range(layerNum * self.directionNum)])
+
+        # 初始化 memMask 为可训练参数
+        self.forwardMaskVar = torch.randn(self.batchSize, 1).to(self.device)
+        self.backwardMaskVar = torch.randn(self.batchSize, 1).to(self.device)
+
         self.loss = 1000
         self.varMinusRst = 1000
 
         self.relu = nn.ReLU()
-        #self.reslinear = nn.Linear(hiddenDim, hiddenDim)
         self.inputToHiddenDim = nn.Linear(trainDataDim, hiddenDim)
-        # self.transDataDim = nn.Linear(hiddenDim, labelDataDim)
-        self.transDataNum = nn.Linear(layerNum, 1)
-        self.memMask = None
+        self.direction2One = nn.Linear(self.layerNum * self.directionNum, 1)
+        self.biHidden2HiddenDim = nn.Linear(self.directionNum * self.hiddenDim, self.hiddenDim)
+        self.hidden2LabelDim = nn.Linear(hiddenDim, labelDataDim).to(self.device)
         self.dropout = nn.Dropout(dropRate)
         self.init_weights()
         self.to(self.device)
-        #self.transInputDataDim = nn.Linear(trainDataDim, hiddenDim)
-        #self.transDataDim = nn.Linear(hiddenDim, labelDataDim)
 
     def init_weights(self):
-        for i in range(self.layerNum):
+        for i in range(self.layerNum * self.directionNum):
             nn.init.xavier_uniform_(self.Wi[i])
             nn.init.xavier_uniform_(self.Wf[i])
             nn.init.xavier_uniform_(self.Wo[i])
@@ -1614,93 +1272,102 @@ class MemLstmNetWork(nn.Module):
             nn.init.xavier_uniform_(self.Uf[i])
             nn.init.xavier_uniform_(self.Uo[i])
             nn.init.xavier_uniform_(self.Ug[i])
+            nn.init.xavier_uniform_(self.forwardMaskVar)
+            nn.init.xavier_uniform_(self.backwardMaskVar)
 
     def forward(self, inputData, inputMask, hidden = None):
         #print(f"MemLstmNetWork inputData = {inputData.shape}, self.trainDataDim = {self.trainDataDim}, self.hiddenDim = {self.hiddenDim}, self.batchSize = {self.batchSize}")
         if (inputData.shape[2] == self.trainDataDim):
             inputData = self.inputToHiddenDim(inputData)
-        '''
-        oriDataNum = 0
-        if (inputData.shape[0] < self.batchSize * 2):
-            oriDataNum = inputData.shape[0]
-            padInputData = torch.zeros(self.batchSize * 2 - inputData.shape[0], inputData.shape[1], inputData.shape[2]).to(self.device)
-            inputData = AddDataToTorch(inputData, padInputData, 0)
-        '''
         if self.isBatchFirst:
             inputData = inputData.transpose(0, 1)  # [seq_len, batch_size, input_size]
-            #inputMask = inputMask.transpose(0, 1)
-        #inputDataRes = self.reslinear(inputData)
-        #reInputMask = torch.ones(inputMask.shape[0], inputMask.shape[1]).to(self.device) - inputMask
-        seqLength, batchSize, _ = inputData.size()
+        trainDataNum, batchSize, trainDataDim = inputData.size()
+
         if hidden is None:
-            hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
-            cellStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum)]
+            hiddenStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum * self.directionNum)]
+            cellStates = [torch.zeros(batchSize, self.hiddenDim).to(self.device) for _ in range(self.layerNum * self.directionNum)]
         else:
             hiddenStates, cellStates = hidden
-        all_outputs = []  # 用于存储每个时间步的输出
-        for i in range(seqLength):
-            inputStep = inputData[i]
-            #inputRes = inputDataRes[i]
-            #maskStep = inputMask[i]
-            #reMaskStep = reInputMask[i]
-            #maskStep = maskStep.unsqueeze(1).expand(maskStep.shape[0], self.hiddenDim)
-            #reverseMaskStep = reMaskStep.unsqueeze(1).expand(reMaskStep.shape[0], self.hiddenDim)
-            #print(f"MemLstmNetWork inputStep = {inputStep.shape}")
-            # 对于每一层 LSTM，更新 hiddenStates 和 cellStates
-            for layer in range(self.layerNum):
-                if (self.memMask is None):
-                    self.memMask = torch.randn(inputStep.shape[0], 1).to(self.device)
-                else:
-                    if (self.memMask.shape[0] < inputStep.shape[0]) and (inputStep.shape[0] % self.memMask.shape[0] == 0):
-                        self.memMask = self.memMask.repeat(int(inputStep.shape[0] / self.memMask.shape[0]), 1)
-                    elif (self.memMask.shape[0] > inputStep.shape[0]) and (self.memMask.shape[0] % inputStep.shape[0] == 0):
-                        self.memMask = self.memMask[0 : inputStep.shape[0], : ]
-                    elif (self.memMask.shape[0] != inputStep.shape[0]):
-                        print(f"MemLstmNetWork inputStep = {inputStep.shape}, self.memMask = {self.memMask.shape}")
-                activeMemMask = torch.sigmoid((inputStep.transpose(0, 1) @ self.memMask).squeeze(1))
 
-                prev_hidden = hiddenStates[layer]
-                #print(f"inputStep = {inputStep.shape}, prev_hidden = {prev_hidden.shape}, self.Wi[layer] = {self.Wi[layer].shape}, self.Ui[layer] = {self.Ui[layer].shape}")
-                curCellStates = nn.functional.gelu(inputStep @ (activeMemMask * self.Wi[layer]) + prev_hidden @ (activeMemMask * self.Ui[layer]))
-                curCellStates = torch.clamp(curCellStates, min = -1, max = 1)
-                forgetGate = nn.functional.gelu(inputStep @ (activeMemMask * self.Wf[layer]) + prev_hidden @ (activeMemMask * self.Uf[layer]))
-                forgetGate = torch.clamp(forgetGate, min = -1, max = 1)
-                choiceGate = nn.functional.gelu(inputStep @ (activeMemMask * self.Wg[layer]) + prev_hidden @ (activeMemMask * self.Ug[layer]))
-                choiceGate = torch.clamp(choiceGate, min = -1, max = 1)
-                outputGate = nn.functional.gelu(inputStep @ (activeMemMask * self.Wo[layer]) + prev_hidden @ (activeMemMask * self.Uo[layer]))
-                outputGate = torch.clamp(outputGate, min = -1, max = 1)
-                cellStates[layer] = forgetGate * prev_hidden + curCellStates * choiceGate
-                hiddenStates[layer] = outputGate * self.relu(cellStates[layer])
-                # 下一层的输入是当前层的输出
-                inputStep = hiddenStates[layer]
-            # 记录每个时间步的输出（使用最后一层的输出作为标准输出）
-            final_output = hiddenStates[-1]
-            # final_output = final_output + inputRes
-            all_outputs.append(final_output)
-        out = torch.stack(all_outputs, dim = 0)
-        hn = torch.stack(hiddenStates, dim = 0)  # Shape: [num_layers, batch_size, hiddenDim]
-        cn = torch.stack(cellStates, dim = 0)  # Shape: [num_layers, batch_size, hiddenDim]
-        hn = self.dropout(hn)
-        out = self.dropout(out)
+        # 正向和反向的输入数据
+        forwardInput = inputData
+        if (self.isBidirectional):
+            backwardInput = inputData.flip(0)
+
+        allOutputs = []  # 用于存储每个时间步的输出
+        for i in range(trainDataNum):
+            forwardStep = forwardInput[i]
+            #print(f"forwardStep = {forwardStep.shape}")
+            forwardMemMask, self.forwardMaskVar = self.GenerateMemMask(forwardStep, self.forwardMaskVar)
+            #print(f"forwardMemMask = {forwardMemMask.shape}")
+            if (self.isBidirectional):
+                backwardStep = backwardInput[i]
+                #print(f"backwardStep = {backwardStep.shape}")
+                backwardMemMask, self.backwardMaskVar = self.GenerateMemMask(backwardStep, self.backwardMaskVar)
+                #print(f"backwardMemMask = {backwardMemMask.shape}")
+            # 对于每一层 LSTM，更新正向和反向的 hiddenStates 和 cellStates
+            for layerIndex in range(self.layerNum):
+                # 正向
+                forwardStep, hiddenStates, cellStates = self.HandleMemLstmInputStep(forwardStep, forwardMemMask, layerIndex, hiddenStates, cellStates)
+                if (self.isBidirectional):
+                    # 反向
+                    backwardLayerIndex = layerIndex + self.layerNum
+                    backwardStep, hiddenStates, cellStates = self.HandleMemLstmInputStep(backwardStep, backwardMemMask, backwardLayerIndex, hiddenStates, cellStates)
+
+            # 将正向和反向的输出拼接在一起
+            if (self.isBidirectional):
+                finalOutput = torch.cat((forwardStep, backwardStep), dim = 1)
+            else:
+                finalOutput = forwardStep
+            allOutputs.append(finalOutput)
+
+        out = torch.stack(allOutputs, dim = 0)
+        hn = torch.stack(hiddenStates, dim = 0)  # Shape: [num_layers * directionNum, batch_size, hiddenDim]
+        cn = torch.stack(cellStates, dim = 0)  # Shape: [num_layers * directionNum, batch_size, hiddenDim]
         if self.isBatchFirst:
             out = out.transpose(0, 1)
             hn = hn.transpose(0, 1)
             cn = cn.transpose(0, 1)
-        if (self.layerNum > 1):
+        out = self.dropout(out)
+        if (self.layerNum > 1) or (self.directionNum > 1):
             hn = hn.transpose(1, 2)
-            hn = self.transDataNum(hn)
+            hn = self.direction2One(hn)
             hn = hn.transpose(1, 2)
-        #out = self.transDataDim(out)
-        #hn = self.transDataDim(hn)
-        #cn = self.transDataDim(cn)
-        '''
-        if (oriDataNum != 0):
-            out = out[0 : oriDataNum, : , : ]
-            hn = hn[0 : oriDataNum, : , : ]
-            cn = cn[0 : oriDataNum, : , : ]
-        '''
+            cn = cn.transpose(1, 2)
+            cn = self.direction2One(cn)
+            cn = cn.transpose(1, 2)
+            out = self.biHidden2HiddenDim(out)
+        #hn = self.hidden2LabelDim(hn)
         #print(f"MemLstmNetWork out = {out.shape}, hn = {hn.shape}, cn = {cn.shape}")
         return out, (hn, cn)
+
+    def GenerateMemMask(self, inputStep, maskTrainWeight):
+        if (maskTrainWeight.shape[0] < inputStep.shape[0]) and (inputStep.shape[0] % maskTrainWeight.shape[0] == 0):
+            maskTrainWeight = maskTrainWeight.repeat(int(inputStep.shape[0] / maskTrainWeight.shape[0]), 1)
+        elif (maskTrainWeight.shape[0] > inputStep.shape[0]) and (maskTrainWeight.shape[0] % inputStep.shape[0] == 0):
+            maskTrainWeight = maskTrainWeight[0 : inputStep.shape[0], : ]
+        elif (maskTrainWeight.shape[0] != inputStep.shape[0]):
+            print(f"MemLstmNetWork inputStep = {inputStep.shape}, maskTrainWeight = {maskTrainWeight.shape}")
+        memMask = torch.sigmoid((inputStep.transpose(0, 1) @ maskTrainWeight).squeeze(1))
+        return memMask, maskTrainWeight
+
+    def HandleMemLstmInputStep(self, inputStep, memMask, layerIndex, hiddenStates, cellStates):
+        prevHidden = hiddenStates[layerIndex]
+        prevCell = cellStates[layerIndex]
+        #print(f"HandleMemLstmInputStep inputStep = {inputStep.shape}, memMask = {memMask.shape}, self.Wi[layerIndex] = {self.Wi[layerIndex].shape}")
+        #print(f"HandleMemLstmInputStep prevHidden = {prevHidden.shape}, memMask = {memMask.shape}, self.Ui[layerIndex] = {self.Ui[layerIndex].shape}")
+        cellState = torch.sigmoid(inputStep @ (memMask * self.Wi[layerIndex]) + prevHidden @ (memMask * self.Ui[layerIndex]))
+        cellState = torch.clamp(cellState, min=-1, max=1)
+        forgetGate = torch.sigmoid(inputStep @ (memMask * self.Wf[layerIndex]) + prevHidden @ (memMask * self.Uf[layerIndex]))
+        forgetGate = torch.clamp(forgetGate, min=-1, max=1)
+        outputGate = torch.sigmoid(inputStep @ (memMask * self.Wo[layerIndex]) + prevHidden @ (memMask * self.Uo[layerIndex]))
+        outputGate = torch.clamp(outputGate, min=-1, max=1)
+        choiceGate = torch.tanh(inputStep @ (memMask * self.Wg[layerIndex]) + prevHidden @ (memMask * self.Ug[layerIndex]))
+        choiceGate = torch.clamp(choiceGate, min=-1, max=1)
+        cellStates[layerIndex] = forgetGate * prevCell + cellState * choiceGate
+        hiddenStates[layerIndex] = outputGate * torch.tanh(cellStates[layerIndex])
+        inputStep = hiddenStates[layerIndex]
+        return inputStep, hiddenStates, cellStates
 
     def SetCriterion(self, func):
         self.criterion = func
@@ -1726,11 +1393,11 @@ class MemLstmNetWork(nn.Module):
                 loss = self.criterion(output, labelData)
                 loss.backward()
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
             #if checkRst:
             #    print(f"TrainNeuralNetWork stop, varThreshold = {varThreshold}")
             #    break
@@ -1806,14 +1473,12 @@ class SnnNetWork(nn.Module):
         self.loss = 1000
         self.varMinusRst = 1000
         self.pruneRate = pruneRate
-        self.fullConnectLayer = nn.Linear(hiddenDim, labelDataDim).to(self.device)
+        self.hidden2LabelDim = nn.Linear(hiddenDim, labelDataDim).to(self.device)
         self.init_weights()
         self.to(self.device)
         if (isOutPut) and (oriTrainNum is not None) and (targetTrainNum is not None):
             #print(f"SnnNetWork labelDataDim = {labelDataDim}, oriTrainNum = {oriTrainNum}, targetTrainNum = {targetTrainNum}")
-            self.seq_transform = nn.Linear(labelDataDim * oriTrainNum, labelDataDim * targetTrainNum)  # 新增的线性层
-            self.oriTrainNum = oriTrainNum
-            self.targetTrainNum = targetTrainNum
+            self.ori2TargetNum = nn.Linear(oriTrainNum, targetTrainNum)  # 新增的线性层
 
     def init_weights(self):
         nn.init.xavier_uniform_(self.Wi)
@@ -1847,15 +1512,13 @@ class SnnNetWork(nn.Module):
                 tempHiddenStates = hiddenStates.unsqueeze(1)
                 hiddenStatesRst = AddDataToTorch(hiddenStatesRst, tempHiddenStates, 1)
             out = F.silu(hiddenStatesRst)
-            out = self.fullConnectLayer(out)
+            out = self.hidden2LabelDim(out)
             out = F.silu(out)
-            #print(f"SnnNetWork forward out = {out.shape}, self.isOutPut = {self.isOutPut}, self.labelDataDim = {self.labelDataDim}")
-            if self.isOutPut and hasattr(self, 'seq_transform'):
-                # 将 (batch, seq_len, output_dim) 转换为 (batch, seq_len * output_dim)
-                out = out.view(self.batchSize, -1)
-                out = self.seq_transform(out)
-                # 再将 (batch, oriTrainNum * output_dim) 转换为 (batch, targetTrainNum, labelDataDim)
-                out = out.view(self.batchSize, self.targetTrainNum, -1)
+
+            if self.isOutPut and hasattr(self, 'ori2TargetNum'):
+                out = out.transpose(1, 2)
+                out = self.ori2TargetNum(out)
+                out = out.transpose(1, 2)
             #print(f"SnnNetWork forward self.isOutPut = {self.isOutPut}, self.labelDataDim = {self.labelDataDim}, inputData = {inputData.shape}, out = {out.shape}")
             return out
         else:
@@ -1904,12 +1567,12 @@ class SnnNetWork(nn.Module):
                 loss.backward()
                 #torch.autograd.set_detect_anomaly(True)
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"TrainNeuralNetWork taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 #print(f"TrainNeuralNetWork TrainNeuralNetWork checkRst = {checkRst}, varMinusRst = {varMinusRst}")
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
                 #PruneTrainModulePara(self, ['Wi', 'Wf', 'Wo', 'Wg', 'Ui', 'Uf', 'Uo', 'Ug', 'dataFreq', 'dataPhasePos', 'hiddenFreq', 'hiddenPhasePos'], self.pruneRate)
                 #PruneTrainModulePara(self, ['Wi', 'Wf', 'Wo', 'Wg', 'Ui', 'Uf', 'Uo', 'Ug', 'dataFreq', 'dataPhasePos'], self.pruneRate)
             #if checkRst:
@@ -2016,29 +1679,29 @@ class RecurrentRnnNetWork(nn.Module):
             self.mergeModuleDict[str(i)] = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         '''
 
-        '''
+        #'''
         if (isNeedMaskMem):
             #self.handleModule = MemRnnNetWork(self.taskName, self.isBatchFirst, self.isNeedMaskMem, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-            self.handleModule = MemLstmNetWork(self.taskName, self.isBatchFirst, self.isNeedMaskMem, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+            self.handleModule = MemLstmNetWork(self.taskName, self.isBatchFirst, self.isBidirectional, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+        else:
+            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, self.isBidirectional, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+        #'''
+
+        '''
+        if (isNeedMaskMem):
+            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, self.isBidirectional, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         else:
             self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, self.isBidirectional, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         '''
 
         '''
         if (isNeedMaskMem):
-            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, True, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+            #self.handleModule = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+            self.handleModule = MaskLstmNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         else:
-            self.handleModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, True, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+            #self.handleModule = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
+            self.handleModule = MaskLstmNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
         '''
-
-        #'''
-        if (isNeedMaskMem):
-            #self.handleModule = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-            self.handleModule = MaskLstmNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-        else:
-            #self.handleModule = MaskResNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-            self.handleModule = MaskLstmNetWork(self.taskName, self.isBatchFirst, self.trainDataDim, self.labelDataDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
-        #'''
 
         self.outputModule = SimpleLstmNetWork(self.taskName, self.isBatchFirst, False, False, self.isBidirectional, self.trainDataDim, self.mergeHiddenDim, self.mergeHiddenDim, self.layerNum, self.batchSize, self.resDropRate).to(self.device)
 
@@ -2062,21 +1725,6 @@ class RecurrentRnnNetWork(nn.Module):
         data = TensorDataset(inputData.to(self.device), labelData.to(self.device))
         self.dataloader = DataLoader(data, batch_size = self.batchSize, drop_last = False, shuffle = False)
 
-    def GetSubTrainData(self, startPos, endPos):
-        finalData = None
-        finalMaskData = None
-        for trainData, labelData in self.dataloader:
-            if (startPos < 0) or (endPos <= 0) or (startPos >= trainData.shape[1]):
-                print(f"GetSubTrainData startPos <= 0 or endPos <= 0, startPos = {startPos}, endPos = {endPos}, trainData = {trainData.shape}")
-                return finalData, finalMaskData
-            if (endPos > trainData.shape[1]):
-                endPos = trainData.shape[1]
-            tempData = trainData[ : , startPos : endPos, : ]
-            tempMaskData = labelData[ : , startPos : endPos]
-            finalData = AddDataToTorch(finalData, tempData, 0)
-            finalMaskData = AddDataToTorch(finalMaskData, tempMaskData, 0)
-        return finalData, finalMaskData
-
     def SaveModuleWeight(self, modulePath):
         print(f"SaveModuleWeight modulePath = {modulePath}")
         torch.save(self, modulePath)
@@ -2089,6 +1737,8 @@ class RecurrentRnnNetWork(nn.Module):
     def forward(self, input, input_mask, isOutput = False):
         #print(f"RecurrentRnnNetWork input = {input.shape}, input_mask = {input_mask.shape}, self.isNeedMaskMem = {self.isNeedMaskMem}")
         #self.batchSize = input.shape[0]
+        self.trainDataDim = input.shape[2]
+        self.labelDataDim = self.trainDataDim
 
         '''
         #reverse input process
@@ -2240,42 +1890,6 @@ class RecurrentRnnNetWork(nn.Module):
         #print(f"TwoTowerForardProcess out sequence = {sequence.shape}")
         return sequence
 
-    def HandleSubSeqProcess(self, startPos, endPos, level):
-        #with torch.autograd.detect_anomaly():
-        trainDataNum = endPos - startPos
-        #print(f"HandleSubSeqProcess level = {level}, trainDataNum = {trainDataNum}, startPos = {startPos}, endPos = {endPos}, self.splitPartNum = {self.splitPartNum}")
-        if (trainDataNum > self.maxSeqLen) and (level < self.maxLevelNum):
-            totalCalcSeq = None
-            totalMask = None
-            partLength = trainDataNum / self.splitPartNum
-            extensionLength = partLength * (self.crossLenRate)
-            for i in range(self.splitPartNum):
-                segmentStart = startPos + i * partLength
-                segmentEnd = startPos + (i + 1) * partLength
-                extendedStart = math.ceil((segmentStart - extensionLength) if (i > 0) else segmentStart)
-                extendedEnd = math.ceil(segmentEnd + extensionLength if (i < self.splitPartNum - 1) else segmentEnd)
-                #print(f"HandleSubSeqProcess level = {level}, i = {i}, startPos = {startPos}, endPos = {endPos}, extendedStart = {extendedStart}, extendedEnd = {extendedEnd}")
-                if (extendedStart < extendedEnd) and (extendedEnd <= endPos):
-                    partCalcSeq = self.HandleSubSeqProcess(extendedStart, extendedEnd, level + 1)
-                    #print(f"HandleSubSeqProcess merge level = {level}, i = {i}, startPos = {startPos}, endPos = {endPos}, extendedStart = {extendedStart}, extendedEnd = {extendedEnd}, offset = {extendedEnd - extendedStart}")
-                    _, tempMaskData = self.GetSubTrainData(extendedStart, extendedEnd)
-                    totalCalcSeq = AddDataToTorch(totalCalcSeq, partCalcSeq, addDim = 1)
-                    #totalMask = AddDataToTorch(totalMask, tempMaskData[ : , -1].unsqueeze(1), addDim = 1)
-            #moduleLevel = self.GetModuleLevel(totalCalcSeq.shape[1])
-            totalMask = torch.ones(totalCalcSeq.shape[0], totalCalcSeq.shape[1]).to(self.device)
-            #out = self.GetSubSeqModuleCalcRst(moduleLevel, totalCalcSeq, totalMask)
-            #out = self.GetSubSeqModuleCalcRst(level, totalCalcSeq, totalMask)
-            out = self.GetSubSeqModuleCalcRst(self.rootLevel, totalCalcSeq, totalMask)
-            #print(f"HandleSubSeqProcess level = {level}, out = {out.shape}")
-            return out
-        else:
-            #print(f"GetSubTrainData startPos = {startPos}, endPos = {endPos}")
-            tempTrainData, tempMaskData = self.GetSubTrainData(startPos, endPos)
-            #print(f"GetSubTrainData level = {level}, trainData = {trainData.shape}")
-            #out = self.GetSubSeqModuleCalcRst(level, tempTrainData, tempMaskData)
-            out = self.GetSubSeqModuleCalcRst(self.rootLevel, tempTrainData, tempMaskData)
-            return out
-
     def GetModuleLevel(self, trainDataLen):
         splitLen = (1 / self.splitPartNum) * (1 + self.crossLenRate * 2)
         #print(f"GetModuleLevel self.trainDataNum = {self.trainDataNum}, trainDataLen = {trainDataLen}, splitLen = {splitLen}")
@@ -2286,18 +1900,6 @@ class RecurrentRnnNetWork(nn.Module):
         moduleId = int(moduleId)
         #print(f"GetModuleLevel self.trainDataNum = {self.trainDataNum}, trainDataLen = {trainDataLen}, splitLen = {splitLen}, moduleId = {moduleId}")
         return moduleId
-
-    def GetSubSeqModuleCalcRst(self, level, trainData, maskData):
-        if (trainData is not None) and (level < self.maxLevelNum):
-            #print(f"GetSubSeqModuleCalcRst moduleIndex = {moduleIndex}, levelIndex = {levelIndex}, self.trainDataNum = {self.trainDataNum}, trainData = {trainData.shape}")
-            #print(f"GetSubSeqModuleCalcRst levelIndex = {levelIndex}, trainData = {trainData.shape}, self.labelDataNum = {self.labelDataNum}")
-            #PrintModuleParaShape(handleSubSeqModule)
-            #out, (hn, cn) = (self.mergeModuleDict[str(level)])(trainData, maskData)
-            out, (hn, cn) = (self.handleModule)(trainData, maskData)
-            #print(f"GetSubSeqModuleCalcRst levelIndex = {levelIndex}, trainData = {trainData.shape}, out = {out.shape} GetSubSeqModuleCalcRst stop end")
-            return out
-        print(f"GetSubSeqModuleCalcRst level = {level} error")
-        return None
 
     def TrainNeuralNetWork(self, epochNum, statPeriod):
         trainLoss = 0
@@ -2357,9 +1959,9 @@ class RecurrentRnnNetWork(nn.Module):
             if parameters.grad is not None:
                 #grad = torch.autograd.grad(loss, parameters, retain_graph = True, allow_unused = True)
                 print(f"TrainNeuralNetWork dictName = {dictName}, key = {key}, gradmean = {parameters.grad.mean()}, gradvar = {parameters.grad.var()}, max = {parameters.grad.max()}, min = {parameters.grad.min()}")
-                print(f"TrainNeuralNetWork dictName = {dictName}, key = {key}, mean = {parameters.mean()}, var = {parameters.var()}, max = {parameters.max()}, min = {parameters.min()}")
             else:
                 print(f"TrainNeuralNetWork dictName = {dictName}, key = {key} grad is None")
+            print(f"TrainNeuralNetWork dictName = {dictName}, key = {key}, mean = {parameters.mean()}, var = {parameters.var()}, max = {parameters.max()}, min = {parameters.min()}")
 
     def GetModuleCalcRst(self, verifyData, maskData):
         with torch.no_grad():
@@ -2482,7 +2084,7 @@ class SadsNetWork(nn.Module):
             self.multiheadAttention = MultiHeadAttention(self.hiddenDim, self.headNum, self.resDropRate)
         '''
 
-        #'''
+        '''
         #HGRC mask func
         self.RNN = S4DWrapper(config)
         self.initial_transform = nn.Linear(self.hiddenDim, self.hiddenDim)
@@ -2496,12 +2098,12 @@ class SadsNetWork(nn.Module):
             pass
         else:
             self.NT = nn.LayerNorm(self.hiddenDim)
-        #'''
+        '''
 
         #额叶
         self.frontalLobe = RecurrentRnnNetWork(self.taskName, self.isBatchFirst, self.isNeedHidden, False, True, self.lobeLabelDim, self.trainDataNum, self.lobeLabelDim, self.hiddenDim, self.layerNum, self.maxSeqLen, self.splitPartNum, self.crossLenRate, self.maxLevelNum, self.manualSeed, self.batchSize, self.resDropRate, self.learnRate, self.weightDecay).to(self.device)
         #颞叶
-        self.temporalLobe = RecurrentRnnNetWork(self.taskName, self.isBatchFirst, self.isNeedHidden, True, False, self.lobeLabelDim, self.trainDataNum, self.lobeLabelDim, self.hiddenDim, self.layerNum, self.maxSeqLen, self.splitPartNum, self.crossLenRate, self.maxLevelNum, self.manualSeed, self.batchSize, self.resDropRate, self.learnRate, self.weightDecay).to(self.device)
+        self.temporalLobe = RecurrentRnnNetWork(self.taskName, self.isBatchFirst, self.isNeedHidden, True, True, self.lobeLabelDim, self.trainDataNum, self.lobeLabelDim, self.hiddenDim, self.layerNum, self.maxSeqLen, self.splitPartNum, self.crossLenRate, self.maxLevelNum, self.manualSeed, self.batchSize, self.resDropRate, self.learnRate, self.weightDecay).to(self.device)
 
         self.attentionFc = nn.Linear(self.hiddenDim, self.hiddenDim)
         self.trainToLobeDim = TransDataDim(self.trainDataDim, self.lobeLabelDim).to(self.device)
@@ -2514,7 +2116,7 @@ class SadsNetWork(nn.Module):
     def SetModel(self, model):
         self.model = model
 
-    #'''
+    '''
     def normalize(self, state):
         if self.norm == "batch":
             return self.NT(state.permute(0, 2, 1).contiguous()).permute(0, 2, 1).contiguous()
@@ -2522,7 +2124,7 @@ class SadsNetWork(nn.Module):
             return state
         else:
             return self.NT(state)
-    #'''
+    '''
 
     def SetCriterion(self, func):
         self.criterion = func
@@ -2567,18 +2169,18 @@ class SadsNetWork(nn.Module):
         #if (inputData.shape[0] > self.batchSize):
         #    print(f"SadsNetWork self.batchSize = {self.batchSize}, inputData = {inputData.shape}, inputMask = {inputMask.shape}")
 
-        '''
+        #'''
         #no mask
         inputData = GenerateNormalizeRst(inputData)
         self.SetTrainDataInfo(inputData, inputMask)
-        '''
-
         #'''
+
+        '''
         #HGRC mask method
         inputData = self.RNN(inputData, inputMask)["sequence"]
         inputData = self.normalize(self.initial_transform(inputData))
         self.SetTrainDataInfo(inputData, inputMask)
-        #'''
+        '''
 
         '''
         if (self.headNum != 0):
@@ -2650,7 +2252,8 @@ class SadsNetWork(nn.Module):
         #make_dot(outputData, params=dict(self.named_parameters())).render("GetSplitIndexList", format="png")
         #assert outputData.size() == (self.batchSize, self.labelDataNum, self.labelDataDim)
         global_state = outputData[ : , -1 , : ]
-
+        #print(f"global_state = {global_state.shape}")
+        #print(f"global_state = {global_state}")
         return {"sequence": inputData,
         "global_state": global_state,
         "input_mask": inputMask,
@@ -2754,9 +2357,9 @@ class SadsNetWork(nn.Module):
             if parameters.grad is not None:
                 #grad = torch.autograd.grad(loss, parameters, retain_graph = True, allow_unused = True)
                 print(f"TrainNeuralNetWork dictName = {dictName}, key = {key}, gradmean = {parameters.grad.mean()}, gradvar = {parameters.grad.var()}, max = {parameters.grad.max()}, min = {parameters.grad.min()}")
-                print(f"TrainNeuralNetWork dictName = {dictName}, key = {key}, mean = {parameters.mean()}, var = {parameters.var()}, max = {parameters.max()}, min = {parameters.min()}")
             else:
                 print(f"TrainNeuralNetWork dictName = {dictName}, key = {key} grad is None")
+            print(f"TrainNeuralNetWork dictName = {dictName}, key = {key}, mean = {parameters.mean()}, var = {parameters.var()}, max = {parameters.max()}, min = {parameters.min()}")
 
     def GetModuleCalcRst(self, verifyData):
         with torch.no_grad():
@@ -2764,7 +2367,7 @@ class SadsNetWork(nn.Module):
             output = self.forward(verifyData)
             return output.cpu()
 
-def HandleSadsNetWorkProcess(taskName, isBatchFirst, isNeedHidden, isOutput, trainData, labelData, lobeLabelDim, hiddenDim, cacheSize, maxSeqLen, splitPartNum, crossLenRate, batchSize, epochNum, resDropRate, learnRate, weightDecay, statPeriod, varThreshold, pruneRate, modulePath):
+def HandleSadsNetWorkProcess(taskName, isBatchFirst, isNeedHidden, trainData, labelData, lobeLabelDim, hiddenDim, cacheSize, maxSeqLen, splitPartNum, crossLenRate, batchSize, epochNum, resDropRate, learnRate, weightDecay, statPeriod, varThreshold, pruneRate, modulePath):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"trainData = {trainData.shape}, labelData = {labelData.shape}, hiddenDim = {hiddenDim}, batchSize = {batchSize}")
     model = SadsNetWork(taskName, isBatchFirst, isNeedHidden, trainData.shape[1], trainData.shape[2], labelData.shape[1], lobeLabelDim, labelData.shape[2], hiddenDim, cacheSize, maxSeqLen, splitPartNum, crossLenRate, batchSize, resDropRate, learnRate, weightDecay).to(device)
@@ -2786,109 +2389,6 @@ def HandleSadsNetWorkProcess(taskName, isBatchFirst, isNeedHidden, isOutput, tra
     return model
 
 # Sads 模型框架实现 end
-
-'''
-# Temp HGRC begin
-
-from torch import nn
-from torch.nn import init
-import torch as T
-import torch.nn.functional as F
-from models.encoders.S4DWrapper import S4DWrapper
-from models.encoders.OrderedMemory import OrderedMemory
-from models.encoders.RecurrentGRCX import RecurrentGRCX
-
-class RecurrentRnnNetWork(nn.Module):
-    def __init__(self, config):
-        super(RecurrentRnnNetWork, self).__init__()
-        self.config = config
-        self.word_dim = config["hidden_size"]
-        self.hidden_dim = config["hidden_size"]
-        self.model_chunk_size = config["model_chunk_size"]
-        self.small_d = 64
-        self.chunk_size = 30
-
-        self.RNN = S4DWrapper(config)
-        self.initial_transform = nn.Linear(self.hidden_dim, self.hidden_dim)
-        if config and "rvnn_norm" in config:
-            self.norm = config["rvnn_norm"]
-        else:
-            self.norm = "layer"
-
-        if self.norm == "batch":
-            self.NT = nn.BatchNorm1d(self.hidden_dim)
-        elif self.norm == "skip":
-            pass
-        else:
-            self.NT = nn.LayerNorm(self.hidden_dim)
-
-        self.GRC = RecurrentGRCX(config)
-
-    def normalize(self, state):
-        if self.norm == "batch":
-            return self.NT(state.permute(0, 2, 1).contiguous()).permute(0, 2, 1).contiguous()
-        elif self.norm == "skip":
-            return state
-        else:
-            return self.NT(state)
-
-
-    def forward(self, input, input_mask):
-
-        sequence = self.RNN(input, input_mask)["sequence"]
-        osequence = sequence.clone()
-        oinput_mask = input_mask.clone()
-
-        sequence = self.normalize(self.initial_transform(sequence))
-        N, S, D = sequence.size()
-        if not self.config["chunk_mode_inference"] and not self.training:
-            self.chunk_size = S
-        else:
-            self.chunk_size = self.model_chunk_size
-
-        while S > 1:
-            N, S, D = sequence.size()
-            if S >= (self.chunk_size + self.chunk_size // 2):
-                if S % self.chunk_size != 0:
-                    e = ((S // self.chunk_size) * self.chunk_size) + self.chunk_size - S
-                    S = S + e
-                    pad = T.zeros(N, e, D).float().to(sequence.device)
-                    input_mask = T.cat([input_mask, T.zeros(N, e).float().to(sequence.device)], dim=-1)
-                    sequence = T.cat([sequence, pad], dim=-2)
-                    assert sequence.size() == (N, S, D)
-                    assert input_mask.size() == (N, S)
-                S1 = S // self.chunk_size
-                chunk_size = self.chunk_size
-            else:
-                S1 = 1
-                chunk_size = S
-            sequence = sequence.view(N, S1, chunk_size, D)
-            sequence = sequence.view(N * S1, chunk_size, D)
-
-            input_mask = input_mask.view(N, S1, chunk_size)
-            input_mask = input_mask.view(N * S1, chunk_size)
-
-            N0 = N
-            N, S, D = sequence.size()
-            assert N == N0 * S1
-
-            sequence = self.GRC(sequence, input_mask)["global_state"]
-            assert sequence.size() == (N, D)
-            sequence = sequence.view(N0, S1, D)
-            input_mask = input_mask.view(N0, S1, chunk_size)[:, :, 0]
-            S = S1
-            N = N0
-
-        assert sequence.size() == (N, 1, D)
-        global_state = sequence.squeeze(1)
-
-        return {"sequence": osequence,
-                "global_state": global_state,
-                "input_mask": oinput_mask,
-                "aux_loss": None}
-
-# Temp HGRC end
-'''
 
 # Mamba 模型框架实现 begin
 
@@ -3115,11 +2615,11 @@ class MambaNetWork(nn.Module):
                 if DIFFERENT_H_STATES_RECURRENT_UPDATE_MECHANISM:
                     model.S6.h[ : curBatchSize, ...].copy_(temp_buffer)
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
 
 def HandleMambaNetWorkProcess(taskName, trainData, labelData, hiddenDim, maxGradNorm, batchSize, epochNum, learnRate, weightDecay, statPeriod, modulePath):
     model = MambaNetWork(taskName, trainData.shape[2], labelData.shape[2], hiddenDim, batchSize)
@@ -3162,7 +2662,7 @@ class TransformerNetWork(nn.Module):
         self.positionalEncode = PositionalEncoding(hiddenDim, maxEncodeLen).to(self.device)
         self.encoderLayer = nn.TransformerEncoderLayer(hiddenDim, headNum).to(self.device)
         self.encoder = nn.TransformerEncoder(self.encoderLayer, layerNum).to(self.device)
-        self.fullConnectLayer = nn.Linear(hiddenDim, labelDataDim).to(self.device)
+        self.hidden2LabelDim = nn.Linear(hiddenDim, labelDataDim).to(self.device)
         self.maxEncodeLen = maxEncodeLen
         self.labelDataDim = labelDataDim
         self.batchSize = batchSize
@@ -3173,7 +2673,7 @@ class TransformerNetWork(nn.Module):
         x = self.embedding(x.to(self.device))
         x = self.positionalEncode(x)
         x = self.encoder(x)
-        x = self.fullConnectLayer(x)
+        x = self.hidden2LabelDim(x)
         return x
 
     def SetTrainDataInfo(self, inputData, labelData):
@@ -3199,11 +2699,11 @@ class TransformerNetWork(nn.Module):
                 loss.backward()
                 #torch.autograd.set_detect_anomaly(True)
                 self.optimizer.step()
+                self.loss = loss.item()
             if (epoch + 1) % statPeriod == 0:
                 print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
                 checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                 self.varMinusRst = varMinusRst
-                self.loss = loss.item()
 
     def GetModuleCalcRst(self, verifyData):
         with torch.no_grad():
@@ -3308,11 +2808,11 @@ class CnnNetWork(nn.Module):
                 loss.backward()
                 #torch.autograd.set_detect_anomaly(True)
                 self.optimizer.step()
+                self.loss = loss.item()
                 if (i + 1) % statPeriod == 0:
                     print(f"taskName = {self.taskName}, Epoch[{epoch + 1}/{epochNum}], self.loss:{self.loss}")
                     checkRst, lastAverage, lastVar, varMinusRst = IsParaVarBounded(self.taskName, dict(self.named_parameters()), lastAverage, lastVar, epoch, 0, self.device)
                     self.varMinusRst = varMinusRst
-                    self.loss = loss.item()
 
     def VerifyCnnNetWork(self, verifyDataLoader):
         model.eval()
@@ -3364,7 +2864,7 @@ class MultiHeadAttention(nn.Module):
         self.key = nn.Linear(hiddenDim, hiddenDim)
         self.value = nn.Linear(hiddenDim, hiddenDim)
         self.dropout = nn.Dropout(p = dropOutRate)
-        self.fullConnectLayer = nn.Linear(hiddenDim, hiddenDim)
+        self.hidden2HiddenDim = nn.Linear(hiddenDim, hiddenDim)
 
     def forward(self, query, key, value, mask = None):
         batch_size = query.shape[0]
@@ -3380,7 +2880,7 @@ class MultiHeadAttention(nn.Module):
         attention = self.dropout(attention)
         # Combine the attention heads
         x = torch.matmul(attention, value).transpose(1, 2).contiguous().view(batch_size, -1, self.hiddenDim)
-        out = self.fullConnectLayer(x)
+        out = self.hidden2HiddenDim(x)
         return out
 
 # MultiHeadAttention 模型框架实现 end
@@ -3394,37 +2894,6 @@ def PrintTorchDataInfo(descStr, torchData):
 def PrintModuleParaShape(module):
     for name, param in module.named_parameters():
         print(f"{name}: {param.size()}")
-
-def MergeTorchDataOutSizeUpLess(firstVec, firstData, secondVec, secondData, matchDim):
-    if not CheckMatchTorchDataOutFormat(firstVec, firstData, secondVec, secondData, matchDim):
-        return
-    firstIndex = 0
-    mergeData = torch.Tensor()
-    for firstDataEle in torch.unbind(firstData, matchDim):
-        secondIndex = FindLessValAfterStartIdxInSizeUpVec(firstVec[firstIndex], secondVec, secondVec.shape[0], secondIndex)
-        if secondIndex != INVALID_NUM:
-            tmpData = torch.cat((firstDataEle.unsqueeze(matchDim), secondData[secondIndex].unsqueeze(matchDim)), dim = 1)
-        else:
-            tmpData = torch.cat((firstDataEle.unsqueeze(matchDim), torch.zeros_like(secondData[0])).unsqueeze(matchDim), dim = 1)
-        mergeData = AddDataToTorch(mergeData, tmpData, matchDim)
-        firstIndex = firstIndex + 1
-    return mergeData
-
-def MergeTorchDataOutSizeDownLess(firstVec, firstData, secondVec, secondData, matchDim):
-    if not CheckMatchTorchDataOutFormat(firstVec, firstData, secondVec, secondData, matchDim):
-        print('MergeTorchDataOutSizeDownLess not CheckMatchTorchDataOutFormat')
-        return
-    firstIndex = 0
-    mergeData = torch.Tensor()
-    for firstDataEle in torch.unbind(firstData, matchDim):
-        secondIndex = FindLessValAfterStartIdxInSizeDownVec(firstVec[firstIndex], secondVec, secondVec.shape[0])
-        if secondIndex != INVALID_NUM:
-            tmpData = torch.cat((firstDataEle.unsqueeze(matchDim), secondData[secondIndex].unsqueeze(matchDim)), dim = 1)
-        else:
-            tmpData = torch.cat((firstDataEle.unsqueeze(matchDim), torch.zeros_like(secondData[0])).unsqueeze(matchDim), dim = 1)
-        mergeData = AddDataToTorch(mergeData, tmpData, matchDim)
-        firstIndex = firstIndex + 1
-    return mergeData
 
 def CheckMatchTorchDataOutFormat(firstVec, firstData, secondVec, secondData, matchDim):
     if (not IsVector(firstVec)) or (not IsVector(secondVec)):
@@ -3473,6 +2942,16 @@ def TransNumpyToIntTorch(numPyData, isTransStrToNum):
         npArray = TransNumpyDataToInt(numPyData)
     tensorData = torch.from_numpy(npArray)
     return tensorData.int()
+
+def TransNumDateToStrDate(oriTorchData, dateCol):
+    # 获取第一列数据
+    numDate = oriTorchData[ : , 0].numpy().astype(int)
+    # 转换为日期格式
+    datesStr = [datetime.strptime(str(date), '%Y%m%d').strftime('%Y/%m/%d') for date in numDate]
+    # 创建 DataFrame，将日期列放在第一列
+    dataDf = pd.DataFrame(oriTorchData.numpy()[ : , 1 : ], columns=[f'col_{i}' for i in range(1, oriTorchData.shape[1])])
+    dataDf.insert(0, 'date', datesStr)  # 将日期列插入到第一列
+    return dataDf
 
 def IsVector(torchData):
     if len(torchData.shape) != 1:
@@ -3528,16 +3007,57 @@ def IsTorchDataValid(torchData):
 
 def SelectTargetValByCol(torchData, colIndex, targetVal):
     if len(torchData.shape) < 2:
-        print(f"SelectTargetValByCol torchData.shape = {torchData.shape}")
-        return torch.empty((0, torchData.size(1)))
+        print(f"SelectTargetValByCol torchData.shape = {torchData.shape}, colIndex = {colIndex}, targetVal = {targetVal}")
+        return None
     indexList = torch.where(torchData[:, colIndex] == targetVal)[colIndex]
     # 打印选择出的行数据
-    rst = torch.empty((0, torchData.size(1)))
+    rst = None
     for index in indexList:
         rowData = torchData[index]
-        rst = torch.cat((rst, rowData.unsqueeze(0)), dim = 0)
+        rst = AddDataToTorch(rst, rowData.unsqueeze(0), 0)
     #print(f"SelectTargetValByCol rst = {rst}")
     return rst
+
+def MergeTargetValBySpecCol(firstData, firstColIndex, secondData, secondColIndex):
+    if (len(firstData.shape) != 2) or (len(secondData.shape) != 2) or (firstColIndex >= firstData.shape[1]) or (secondColIndex >= secondData.shape[1]):
+        print(f"MergeTargetValBySpecCol err, firstData = {firstData.shape}, firstColIndex = {firstColIndex}, secondData = {secondData.shape}, secondColIndex = {secondColIndex}")
+        return None
+    oriColNum = firstData.shape[1]
+    firstData = AddDataToTorch(firstData, torch.zeros(firstData.shape[0], secondData.shape[1] - secondColIndex - 1), 1)
+    for index, targetVal in enumerate(firstData[ : , firstColIndex]):
+        tempData = SelectTargetValByCol(secondData, secondColIndex, targetVal)
+        if (tempData != None):
+            firstData[index, oriColNum : ] = tempData[-1, secondColIndex + 1 : ]
+        else:
+            firstData[index, oriColNum : ] = torch.zeros(1, secondData.shape[1] - secondColIndex - 1)
+    return firstData
+
+def MergeSizeUpTorchDataOut(firstVec, firstData, secondVec, secondData):
+    if IsTorchDataEmpty(firstVec) or IsTorchDataEmpty(firstData) or IsTorchDataEmpty(secondVec) or IsTorchDataEmpty(secondData):
+        print(f"MergeSizeUpTorchDataOut firstVec = {firstVec.shape}, firstData = {firstData.shape}")
+        return firstData
+    if (firstVec.shape[0] != firstData.shape[0]) and (secondVec.shape[0] != secondData.shape[0]):
+        print(f"MergeSizeUpTorchDataOut firstVec = {firstVec.shape}, firstData = {firstData.shape}, secondVec = {secondVec.shape}, secondData = {secondData.shape}")
+        return firstData
+    print(f"MergeSizeUpTorchDataOut firstVec = {firstVec.shape}, firstData = {firstData.shape}, secondVec = {secondVec.shape}, secondData = {secondData.shape}")
+    rstData = None
+    for firstIndex in range(0, firstVec.shape[0]):
+        #print(f"firstIndex = {firstIndex}, firstVec = {firstVec.shape}, firstData = {firstData.shape}, secondVec = {secondVec.shape}, secondData = {secondData.shape}")
+        rstRank = firstData[firstIndex, : ].unsqueeze(0)
+        isFind = False
+        for secondIndex in range(secondVec.shape[0] - 1, -1, -1):
+            if(secondVec[secondIndex] < firstVec[firstIndex]):
+                rstRank = AddDataToTorch(rstRank, secondData[secondIndex, : ].unsqueeze(0), 1)
+                isFind = True
+                break
+        if not isFind:
+            rstRank = AddDataToTorch(rstRank, torch.zeros(1, secondData.shape[1]), 1)
+        rstData = AddDataToTorch(rstData, rstRank, 0)
+    if (rstData == None):
+        print(f"MergeSizeUpTorchDataOut rstData == None")
+    else:
+        print(f"MergeSizeUpTorchDataOut rstData == {rstData.shape}")
+    return rstData
 
 def SaveSpecDecimalNumSize(data, size):
     return (data * torch.pow(torch.tensor(10), size)).round() / (torch.pow(torch.tensor(10), size))
@@ -3728,6 +3248,30 @@ def DifferentiableSort(x, temperature=1.0):
     sorted_x = torch.mm(onehot, softmax).sum(dim=1)
     indices = sorted_x.argsort(descending=True)
     return indices
+
+def CalTorchNorm(torchData, classifyNum, calDim = None):
+    return torchData.norm(p = classifyNum, dim = calDim)
+
+def SetPrintAllNumpyData():
+    np.set_printoptions(threshold = np.inf, linewidth=200)
+
+def SetPrintAllTorchData():
+    #torch.set_printoptions(threshold = float('inf'))
+    torch.set_printoptions(threshold = 100)
+    torch.set_printoptions(linewidth = 200)
+    torch.set_printoptions(edgeitems = 10)
+
+def RepeatTorch(oriData, repeatDim, repeatNum):
+    if (oriData == None):
+        print(f"RepeatTorch oriData is None")
+        return None
+    if (len(oriData.shape) <= repeatDim):
+        print(f"RepeatTorch oriData = {oriData.shape}, repeatDim = {repeatDim} is too large")
+        return None
+    repeatList = [1] * len(oriData.shape) #[1, 1, 1, 1, 1] list
+    repeatList[repeatDim] = repeatNum
+    repeatTuple = tuple(repeatList)
+    return oriData.repeat(repeatTuple)
 
 if __name__ == "__main__":
     # 定义超参的大小
